@@ -1,0 +1,75 @@
+{
+    "holdings": [
+        {
+            "symbol": "SMR",
+            "price_paid": 24.489999771118164,
+            "shares": 100,
+            "stop_loss": 19.95969946861267,
+            "profit_target": 33.550600376129154
+        },
+        {
+            "symbol": "COST",
+            "price_paid": 971.5,
+            "shares": 100,
+            "stop_loss": 932.4108797679806,
+            "profit_target": 1049.6782404640387,
+            "strategy": "Ascending Channel"
+        },
+        {
+            "symbol": "DRS",
+            "price_paid": 34.869998931884766,
+            "shares": 100,
+            "stop_loss": 32.92502244077661,
+            "profit_target": 38.75995191410108,
+            "strategy": "Ascending Channel"
+        },
+        {
+            "symbol": "AEHR",
+            "price_paid": 14.489999771118164,
+            "shares": 100,
+            "stop_loss": 13.14214243207659,
+            "profit_target": 17.185714449201313,
+            "strategy": "Breakout"
+        },
+        {
+            "symbol": "IONQ",
+            "price_paid": 41.810001373291016,
+            "shares": 100,
+            "stop_loss": 34.8586801801409,
+            "profit_target": 55.712643759591245,
+            "strategy": "Breakout"
+        },
+        {
+            "symbol": "EE",
+            "price_paid": 32.029998779296875,
+            "shares": 100,
+            "stop_loss": 30.276820523398264,
+            "profit_target": 35.5363552910941,
+            "strategy": "VWAP"
+        },
+        {
+            "symbol": "EE",
+            "price_paid": 32.33000183105469,
+            "shares": 100,
+            "stop_loss": 30.566109044211252,
+            "profit_target": 35.85778740474156,
+            "strategy": "AnchoredVWAP"
+        },
+        {
+            "symbol": "GOOG",
+            "price_paid": 197.5500030517578,
+            "shares": 100,
+            "stop_loss": 190.54843739100866,
+            "profit_target": 211.5531343732561,
+            "strategy": "VWAP"
+        },
+        {
+            "symbol": "VST",
+            "price_paid": 170.86000061035156,
+            "shares": 100,
+            "stop_loss": 156.43910925728935,
+            "profit_target": 199.701783316476,
+            "strategy": "VWAP"
+        }
+    ]
+}

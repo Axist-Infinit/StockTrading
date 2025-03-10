@@ -1,0 +1,162 @@
+{
+    "trade_history": [
+        {
+            "symbol": "CCJ",
+            "price_paid": 54.40999984741211,
+            "shares": 100,
+            "stop_loss": 51.36178629738944,
+            "profit_target": 60.50642694745744,
+            "exit_date": "2024-11-21",
+            "exit_price": 60.93,
+            "result": "Profit Target Hit"
+        },
+        {
+            "symbol": "NVDA",
+            "price_paid": 146.6699981689453,
+            "shares": 100,
+            "stop_loss": 139.996496963501,
+            "profit_target": 160.01700057983396,
+            "strategy": "Breatkout",
+            "exit_date": "2024-11-25",
+            "exit_price": 137.76,
+            "result": "Stop Loss Hit"
+        },
+        {
+            "symbol": "CVLT",
+            "price_paid": 162.25,
+            "shares": 100,
+            "stop_loss": 154.85428728376115,
+            "profit_target": 177.04142543247767,
+            "exit_date": "2024-11-27",
+            "exit_price": 177.6,
+            "result": "Profit Target Hit"
+        },
+        {
+            "symbol": "UAVS",
+            "price_paid": 3.100100040435791,
+            "shares": 100,
+            "stop_loss": 2.287039099501826,
+            "profit_target": 4.726221922303721,
+            "exit_date": "2024-11-27",
+            "exit_price": 5.39,
+            "result": "Profit Target Hit"
+        },
+        {
+            "symbol": "XOM",
+            "price_paid": 121.93000030517578,
+            "shares": 100,
+            "stop_loss": 118.81642750331334,
+            "profit_target": 128.15714590890067,
+            "exit_date": "2024-11-27",
+            "exit_price": 117.97,
+            "result": "Stop Loss Hit"
+        },
+        {
+            "symbol": "MA",
+            "price_paid": 513.6900024414062,
+            "shares": 100,
+            "stop_loss": 504.5207181658064,
+            "profit_target": 532.028570992606,
+            "exit_date": "2024-11-27",
+            "exit_price": 532.16,
+            "result": "Profit Target Hit"
+        },
+        {
+            "symbol": "CLS",
+            "price_paid": 91.44000244140625,
+            "shares": 100,
+            "stop_loss": 84.35767090447044,
+            "profit_target": 105.60466551527787,
+            "strategy": "Breatkout",
+            "exit_date": "2024-11-27",
+            "exit_price": 81.83,
+            "result": "Stop Loss Hit"
+        },
+        {
+            "symbol": "VST",
+            "price_paid": 166.61000061035156,
+            "shares": 100,
+            "stop_loss": 148.1239924438106,
+            "profit_target": 203.58201694343347,
+            "strategy": "Breatkout",
+            "exit_date": "2024-12-11",
+            "exit_price": 146.0,
+            "result": "Stop Loss Hit"
+        },
+        {
+            "symbol": "OKLO",
+            "price_paid": 25.229999542236328,
+            "shares": 100,
+            "stop_loss": 19.96553543635777,
+            "profit_target": 35.75892775399345,
+            "exit_date": "2024-12-11",
+            "exit_price": 19.27,
+            "result": "Stop Loss Hit"
+        },
+        {
+            "symbol": "RCAT",
+            "price_paid": 8.359999656677246,
+            "shares": 100,
+            "stop_loss": 2.690000057220459,
+            "profit_target": 9.40999960899353,
+            "strategy": "Inverse Head and Shoulders",
+            "exit_date": "2024-12-17",
+            "exit_price": 9.67,
+            "result": "Profit Target Hit"
+        },
+        {
+            "symbol": "ISRG",
+            "price_paid": 536.4500122070312,
+            "shares": 100,
+            "stop_loss": 516.9740266311253,
+            "profit_target": 575.4019833588432,
+            "exit_date": "2025-01-21",
+            "exit_price": 604.12,
+            "result": "Profit Target Hit"
+        },
+        {
+            "symbol": "FARO",
+            "price_paid": 28.200000762939453,
+            "shares": 100,
+            "stop_loss": 27.02460360154361,
+            "profit_target": 30.55079508573114,
+            "strategy": "Breakout",
+            "exit_date": "2025-01-21",
+            "exit_price": 31.48,
+            "result": "Profit Target Hit"
+        },
+        {
+            "symbol": "UPST",
+            "price_paid": 84.45999908447266,
+            "shares": 100,
+            "stop_loss": 77.11156740537727,
+            "profit_target": 99.15686244266342,
+            "strategy": "Breakout",
+            "exit_date": "2025-01-21",
+            "exit_price": 64.01,
+            "result": "Stop Loss Hit"
+        },
+        {
+            "symbol": "UPST",
+            "price_paid": 84.45999908447266,
+            "shares": 100,
+            "stop_loss": 77.11156740537727,
+            "profit_target": 99.15686244266342,
+            "strategy": "Breakout",
+            "exit_date": "2025-01-21",
+            "exit_price": 64.01,
+            "result": "Stop Loss Hit"
+        },
+        {
+            "symbol": "SGMO",
+            "price_paid": 2.6500000953674316,
+            "shares": 100,
+            "stop_loss": 2.270714372396469,
+            "profit_target": 3.4085715413093567,
+            "strategy": "Breakout",
+            "exit_date": "2025-01-21",
+            "exit_price": 1.13,
+            "result": "Stop Loss Hit"
+        }
+    ]
+}

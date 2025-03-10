@@ -1,0 +1,101 @@
+{
+    "UPST": {
+        "timestamp": "2024-12-15 20:39:29",
+        "queried_price": 84.45999908447266,
+        "bullish_1ATR": 90.60349873134068,
+        "bearish_1ATR": 78.31649943760463,
+        "bullish_3ATR": 102.89049802507674,
+        "bearish_3ATR": 66.02950014386857,
+        "bullish_5ATR": 115.17749731881278,
+        "bearish_5ATR": 53.74250085013254,
+        "overall_prediction": "Bullish"
+    },
+    "DAWN": {
+        "timestamp": "2024-12-15 23:43:59",
+        "queried_price": 12.75,
+        "bullish_1ATR": 13.275571346282959,
+        "bearish_1ATR": 12.224428653717041,
+        "bullish_3ATR": 14.326714038848877,
+        "bearish_3ATR": 11.173285961151123,
+        "bullish_5ATR": 15.377856731414795,
+        "bearish_5ATR": 10.122143268585205,
+        "overall_prediction": "Bullish"
+    },
+    "HRMY": {
+        "timestamp": "2024-12-15 23:44:05",
+        "queried_price": 32.38999938964844,
+        "bullish_1ATR": 33.577142579214915,
+        "bearish_1ATR": 31.20285620008196,
+        "bullish_3ATR": 35.95142895834786,
+        "bearish_3ATR": 28.82856982094901,
+        "bullish_5ATR": 38.325715337480815,
+        "bearish_5ATR": 26.45428344181606,
+        "overall_prediction": "Bearish"
+    },
+    "IOVA": {
+        "timestamp": "2024-12-15 23:44:10",
+        "queried_price": 7.829999923706055,
+        "bullish_1ATR": 8.292142731802803,
+        "bearish_1ATR": 7.367857115609305,
+        "bullish_3ATR": 9.216428347996303,
+        "bearish_3ATR": 6.443571499415807,
+        "bullish_5ATR": 10.140713964189802,
+        "bearish_5ATR": 5.519285883222308,
+        "overall_prediction": "Bearish"
+    },
+    "IONQ": {
+        "timestamp": "2024-12-15 23:44:24",
+        "queried_price": 33.83000183105469,
+        "bullish_1ATR": 38.06128733498709,
+        "bearish_1ATR": 29.59871632712228,
+        "bullish_3ATR": 46.52385834285191,
+        "bearish_3ATR": 21.136145319257466,
+        "bullish_5ATR": 54.986429350716726,
+        "bearish_5ATR": 12.673574311392649,
+        "overall_prediction": "Bullish"
+    },
+    "AEHR": {
+        "timestamp": "2024-12-17 17:09:02",
+        "queried_price": 14.539999961853027,
+        "bullish_1ATR": 15.495000089917864,
+        "bearish_1ATR": 13.58499983378819,
+        "bullish_3ATR": 17.405000346047537,
+        "bearish_3ATR": 11.674999577658518,
+        "bullish_5ATR": 19.31500060217721,
+        "bearish_5ATR": 9.764999321528844,
+        "overall_prediction": "Bullish"
+    },
+    "SGMO": {
+        "timestamp": "2024-12-17 17:09:03",
+        "queried_price": 2.819999933242798,
+        "bullish_1ATR": 3.069999933242798,
+        "bearish_1ATR": 2.569999933242798,
+        "bullish_3ATR": 3.569999933242798,
+        "bearish_3ATR": 2.069999933242798,
+        "bullish_5ATR": 4.069999933242798,
+        "bearish_5ATR": 1.5699999332427979,
+        "overall_prediction": "Bullish"
+    },
+    "LUNR": {
+        "timestamp": "2024-12-18 09:36:09",
+        "queried_price": 14.449999809265137,
+        "bullish_1ATR": 15.875778130122594,
+        "bearish_1ATR": 13.02422148840768,
+        "bullish_3ATR": 18.727334771837505,
+        "bearish_3ATR": 10.172664846692767,
+        "bullish_5ATR": 21.57889141355242,
+        "bearish_5ATR": 7.321108204977852,
+        "overall_prediction": "Bullish"
+    },
+    "FCX": {
+        "timestamp": "2024-12-18 11:00:24",
+        "queried_price": 40.209999084472656,
+        "bullish_1ATR": 41.36142785208566,
+        "bearish_1ATR": 39.05857031685965,
+        "bullish_3ATR": 43.664285387311665,
+        "bearish_3ATR": 36.75571278163365,
+        "bullish_5ATR": 45.96714292253767,
+        "bearish_5ATR": 34.452855246407644,
+        "overall_prediction": "Bearish"
+    }
+}
