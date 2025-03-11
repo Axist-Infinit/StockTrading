@@ -1,0 +1,48 @@
+{
+  "API_KEYS": {
+    "FRED_API_KEY": "402613a3665ed315812a327281e6e697"
+  },
+  "FRED_SERIES": ["CPIAUCSL", "UNRATE"],
+
+  "TICKER_LIST": [
+    "SPY", "QQQ", "IWM", "EEM",
+    "XLB", "XLC", "XLE", "XLF",
+    "XLI", "XLK", "XLP", "XLU",
+    "XLV", "XLY", "XLRE",
+    "TLT", "DBC"
+  ],
+
+  "TIMEFRAMES": {
+    "daily": {
+      "yf_period": "5y",
+      "yf_interval": "1d"
+    }
+  },
+
+  "ALGO_SETTINGS": {
+    "initial_capital": 1000000,
+    "rebal_frequency": 10,
+    "drawdown_limit": 0.10,
+    "yoy_inflation_cutoff": 8.0,
+    "vix_threshold": 25.0,
+    "use_risk_parity": false,
+    "risk_per_trade": 1.0
+  },
+
+  "FUNDAMENTAL_DATA": {
+    "EPS_GROWTH": {
+      "SPY": 10, "QQQ": 12, "IWM": 8, "EEM": 6,
+      "XLB": 5, "XLC": 5, "XLE": 5, "XLF": 5,
+      "XLI": 5, "XLK": 5, "XLP": 5, "XLU": 5,
+      "XLV": 5, "XLY": 5, "XLRE": 5,
+      "TLT": 3, "DBC": 3
+    },
+    "ROE": {
+      "SPY": 15, "QQQ": 18, "IWM": 12, "EEM": 10,
+      "XLB": 8,  "XLC": 8,  "XLE": 8,  "XLF": 8,
+      "XLI": 8,  "XLK": 8,  "XLP": 8,  "XLU": 8,
+      "XLV": 8,  "XLY": 8,  "XLRE": 8,
+      "TLT": 5,  "DBC": 4
+    }
+  }
+}

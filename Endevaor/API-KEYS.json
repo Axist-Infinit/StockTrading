@@ -1,0 +1,7 @@
+Alpha Vantage: 13LJ0VOBUDK3S7B7
+  "FRED_API_KEY": "402613a3665ed315812a327281e6e697"
+
+curl --request GET 
+	--url 'https://seeking-alpha.p.rapidapi.com/market/get-earnings-calendar?with_rating=false&currency=USD' 
+	--header 'x-rapidapi-host: seeking-alpha.p.rapidapi.com' 
+	--header 'x-rapidapi-key: 18cc99a291msha8a23f77b660fabp1d762ejsn1ee359da5654'
