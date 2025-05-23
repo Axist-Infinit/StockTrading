@@ -1297,6 +1297,13 @@ def show_signals_for_current_week():
     preload_interval_cache(tickers)      # bulk cache warm-up
 
     today   = datetime.date.today()
+    # Define date strings for cached_download
+    end_date_str = today.strftime("%Y-%m-%d")
+    start_60d_str = (today - datetime.timedelta(days=60)).strftime("%Y-%m-%d")
+    start_120d_str = (today - datetime.timedelta(days=120)).strftime("%Y-%m-%d")
+    start_380d_str = (today - datetime.timedelta(days=380)).strftime("%Y-%m-%d")
+    start_max_str = (today - datetime.timedelta(days=2*365)).strftime("%Y-%m-%d") # Approx 2 years
+    
     monday  = today - datetime.timedelta(days=today.weekday())
     start_s = (monday - datetime.timedelta(days=180)).strftime("%Y-%m-%d")
     end_s   = today.strftime("%Y-%m-%d")
@@ -1305,8 +1312,15 @@ def show_signals_for_current_week():
     for tkr in tickers:
         print(f"\n=== {tkr}: {monday} → {today} ===")
         try:
-            # use cached frames, then slice locally
-            df15, df30, df1h, df90, df1d, df1w = fetch_data(tkr)
+            # use cached_download to get sufficient history for each interval, then slice locally
+            df15 = cached_download(tkr, start=start_60d_str, end=end_date_str, interval="15m")
+            df30 = cached_download(tkr, start=start_60d_str, end=end_date_str, interval="30m")
+            df1h = cached_download(tkr, start=start_120d_str, end=end_date_str, interval="1h")
+            df90 = cached_download(tkr, start=start_60d_str, end=end_date_str, interval="90m")
+            df1d = cached_download(tkr, start=start_380d_str, end=end_date_str, interval="1d")
+            df1w = cached_download(tkr, start=start_max_str, end=end_date_str, interval="1wk")
+            
+            # Slice down to the relevant period for signal generation (current week's context)
             df15, df30, df1h, df90, df1d, df1w = (
                 df15.loc[start_s:end_s], df30.loc[start_s:end_s],
                 df1h.loc[start_s:end_s], df90.loc[start_s:end_s],
