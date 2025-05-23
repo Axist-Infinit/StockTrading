@@ -1,0 +1,44 @@
+[
+  {
+    "symbol": "TQQQ",
+    "direction": "LONG",
+    "entry_price": 150.00,
+    "stop_loss": 145.00,
+    "profit_target": 160.00,
+    "status": "Open",
+    "entry_date": "2023-10-01"
+  },
+  {
+    "symbol": "SQQQ",
+    "direction": "SHORT",
+    "entry_price": 20.00,
+    "stop_loss": 21.00,
+    "profit_target": 19.00,
+    "status": "Open",
+    "entry_date": "2023-10-05"
+  },
+  {
+    "symbol": "XLF",
+    "direction": "LONG",
+    "entry_price": 35.00,
+    "stop_loss": 34.00,
+    "profit_target": 37.00,
+    "status": "Target",
+    "entry_date": "2023-09-15",
+    "exit_date": "2023-09-20",
+    "exit_price": 37.00,
+    "pnl_pct": 5.71
+  },
+  {
+    "symbol": "XLE",
+    "direction": "LONG",
+    "entry_price": 80.00,
+    "stop_loss": 78.00,
+    "profit_target": 84.00,
+    "status": "Stop",
+    "entry_date": "2023-09-01",
+    "exit_date": "2023-09-05",
+    "exit_price": 78.00,
+    "pnl_pct": -2.50
+  }
+]
