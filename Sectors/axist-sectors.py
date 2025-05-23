@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 Swing Trading Strategy Script with Feature Refinement and Backtesting
 
@@ -57,7 +57,7 @@ import configparser
 import warnings
 warnings.filterwarnings('ignore', category=FutureWarning)
 
-_MAX_QPS      = 2          # Yahoo lets ~2 download calls / second
+_MAX_QPS      = 1          # Yahoo lets ~2 download calls / second
 _TOKENS       = _MAX_QPS
 _LAST_REFILL  = time.time()
 _LOCK         = threading.Lock()
@@ -122,7 +122,7 @@ def _safe_download(ticker, *, period=None, start=None, end=None,
             if period:
                 df = yf.download(ticker, period=period, interval=interval,
                                  auto_adjust=True, progress=False)
-                time.sleep(0.15)         # ← NEW gentle spacing
+                time.sleep(0.5)         # ← NEW gentle spacing
             else:
                 df = yf.download(ticker, start=start, end=end,
                                  interval=interval, auto_adjust=True,
@@ -462,39 +462,37 @@ def fetch_data(ticker: str,
 
     return df_15, df_30, df_1h, df_90, df_1d, df_1wk
 
-
 def compute_indicators(df: pd.DataFrame,
                        timeframe: str = "daily") -> pd.DataFrame:
     df = df.copy()
     req = {"Open", "High", "Low", "Close", "Volume"}
     if df.empty or not req.issubset(df.columns):
-        return df                                    # nothing to do
+        return df                      # nothing to do
 
-    # ---- adaptive look-back ------------------------------------------
+    # ── adaptive look-back
     pct_vol = (
         df["Close"].pct_change().rolling(20).std().iloc[-1]
         if len(df) >= 21 else
         df["Close"].pct_change().std()
     ) or 0.0
-
     window = 21 if pct_vol >= 0.06 else 10 if pct_vol <= 0.01 else 14
 
-    if len(df) <= window:                           # e.g. 6 rows vs 21
-        return pd.DataFrame(index=df.index)         # safe stub frame
+    # *** NEW *** – ensure we still have > window valid rows AFTER NaNs
+    if df["Close"].count() <= window:
+        return pd.DataFrame(index=df.index)   # safe stub
 
-    rsi  = RSIIndicator(df["Close"], window).rsi()
-    adx  = ADXIndicator(df["High"], df["Low"], df["Close"], window)
-    sto  = StochasticOscillator(df["High"], df["Low"], df["Close"],
-                                window, smooth_window=3)
+    # ── core indicators
+    rsi = RSIIndicator(df["Close"], window).rsi()
+    adx = ADXIndicator(df["High"], df["Low"], df["Close"], window)
+    sto = StochasticOscillator(df["High"], df["Low"], df["Close"],
+                               window, smooth_window=3)
     cci  = CCIIndicator(df["High"], df["Low"], df["Close"], window, 0.015)
     macd = MACD(df["Close"], 26, 12, 9)
     bb   = BollingerBands(df["Close"], 20, 2)
     atr  = AverageTrueRange(df["High"], df["Low"], df["Close"], window)
-
     roc  = ROCIndicator(df["Close"], window)
     wlr  = WilliamsRIndicator(df["High"], df["Low"], df["Close"], window)
-    mfi  = MFIIndicator(df["High"], df["Low"], df["Close"],
-                        df["Volume"], window)
+    mfi  = MFIIndicator(df["High"], df["Low"], df["Close"], df["Volume"], window)
     obv  = OnBalanceVolumeIndicator(df["Close"], df["Volume"])
     cmf  = ChaikinMoneyFlowIndicator(df["High"], df["Low"], df["Close"],
                                      df["Volume"], window)
@@ -517,32 +515,29 @@ def compute_indicators(df: pd.DataFrame,
     df[f"BB_middle_{timeframe}"]   = bb.bollinger_mavg()
     df[f"ATR_{timeframe}"]         = atr.average_true_range()
     df[f"ATR_pct_{timeframe}"]     = df[f"ATR_{timeframe}"] / df["Close"]
-
     df[f"ROC_{timeframe}"]         = roc.roc()
     df[f"WR_{timeframe}"]          = wlr.williams_r()
     df[f"MFI_{timeframe}"]         = mfi.money_flow_index()
     df[f"OBV_{timeframe}"]         = obv.on_balance_volume()
     df[f"CMF_{timeframe}"]         = cmf.chaikin_money_flow()
-
-    df[f"KC_upper_{timeframe}"]  = kc.keltner_channel_hband()
-    df[f"KC_lower_{timeframe}"]  = kc.keltner_channel_lband()
-    df[f"KC_middle_{timeframe}"] = (
+    df[f"KC_upper_{timeframe}"]    = kc.keltner_channel_hband()
+    df[f"KC_lower_{timeframe}"]    = kc.keltner_channel_lband()
+    df[f"KC_middle_{timeframe}"]   = (
         kc.keltner_channel_mavg() if hasattr(kc, "keltner_channel_mavg")
         else kc.keltner_channel_mband()
     )
-
-    df[f"DC_upper_{timeframe}"]  = dc.donchian_channel_hband()
-    df[f"DC_lower_{timeframe}"]  = dc.donchian_channel_lband()
-    df[f"DC_middle_{timeframe}"] = (
+    df[f"DC_upper_{timeframe}"]    = dc.donchian_channel_hband()
+    df[f"DC_lower_{timeframe}"]    = dc.donchian_channel_lband()
+    df[f"DC_middle_{timeframe}"]   = (
         dc.donchian_channel_mavg() if hasattr(dc, "donchian_channel_mavg")
         else dc.donchian_channel_mband()
     )
 
     if timeframe in {"daily", "hourly", "weekly", "1wk"}:
-        df[f"SMA20_{timeframe}"] = SMAIndicator(df["Close"], 20).sma_indicator()
-        df[f"SMA50_{timeframe}"] = SMAIndicator(df["Close"], 50).sma_indicator()
-        df[f"EMA50_{timeframe}"] = EMAIndicator(df["Close"], 50).ema_indicator()
-        df[f"EMA200_{timeframe}"]= EMAIndicator(df["Close"], 200).ema_indicator()
+        df[f"SMA20_{timeframe}"]  = SMAIndicator(df["Close"], 20).sma_indicator()
+        df[f"SMA50_{timeframe}"]  = SMAIndicator(df["Close"], 50).sma_indicator()
+        df[f"EMA50_{timeframe}"]  = EMAIndicator(df["Close"], 50).ema_indicator()
+        df[f"EMA200_{timeframe}"] = EMAIndicator(df["Close"], 200).ema_indicator()
 
     return df
 
@@ -1434,70 +1429,70 @@ def signals_performance_cli():
 
     urwid.MainLoop(lay, palette, unhandled_input=unhandled).run()
 
-
 def closed_stats_cli():
-    """
-    Color-enhanced statistics for CLOSED positions in weekly_signals.json.
-    Green  = favourable numbers, Red = unfavourable.
-    """
-    recs = [p for p in load_predictions() if p['status'] != 'Open']
-    if not recs:
-        print("No closed trades recorded.")
-        input("\nPress Enter to return …")
-        return
+        """
+        Color-enhanced statistics for CLOSED positions in weekly_signals.json.
+        Green  = favourable numbers, Red = unfavourable.
+        """
+        # Define color functions locally for clarity
+        def g(text): return Fore.GREEN + str(text) + Style.RESET_ALL
+        def r(text): return Fore.RED + str(text) + Style.RESET_ALL
+        def b(text): return Style.BRIGHT + str(text) + Style.RESET_ALL
 
-    # ── compute P/L % for every record (in case older JSON lacks it) ──
-    for r in recs:
-        if 'pnl_pct' not in r or r['pnl_pct'] is None:
-            ep, xp = r['entry_price'], r.get('exit_price', r['entry_price'])
-            if r['direction'] == 'LONG':
-                r['pnl_pct'] = (xp - ep) / ep * 100
-            else:                              # SHORT
-                r['pnl_pct'] = (ep - xp) / ep * 100
-            r['pnl_pct'] = round(r['pnl_pct'], 2)
+        recs = [p for p in load_predictions() if p['status'] != 'Open']
+        if not recs:
+            print("No closed trades recorded.")
+            input("\nPress Enter to return …")
+            return
 
-    wins   = [r for r in recs if r['status'] == 'Target']
-    losses = [r for r in recs if r['status'] in ('Stop', 'Closed')]
-    total  = len(recs)
-    win_rt = len(wins) / total * 100
+        # ── compute P/L % for every record (in case older JSON lacks it) ──
+        for r_item in recs:
+            if 'pnl_pct' not in r_item or r_item['pnl_pct'] is None:
+                ep, xp = r_item['entry_price'], r_item.get('exit_price', r_item['entry_price'])
+                if r_item['direction'] == 'LONG':
+                    r_item['pnl_pct'] = (xp - ep) / ep * 100
+                else:                              # SHORT
+                    r_item['pnl_pct'] = (ep - xp) / ep * 100
+                r_item['pnl_pct'] = round(r_item['pnl_pct'], 2)
 
-    avg_win = np.mean([w['pnl_pct'] for w in wins])   if wins   else 0.0
-    avg_los = np.mean([l['pnl_pct'] for l in losses]) if losses else 0.0
+        wins   = [p for p in recs if p['status'] == 'Target']
+        losses = [p for p in recs if p['status'] in ('Stop', 'Closed')]
+        total  = len(recs)
+        win_rt = (len(wins) / total * 100) if total > 0 else 0
 
-    # compounded equity curve
-    equity = 1.0
-    for r in recs: equity *= 1 + r['pnl_pct'] / 100
-    tot_ret = (equity - 1) * 100
+        avg_win = np.mean([w['pnl_pct'] for w in wins])   if wins   else 0.0
+        avg_los = np.mean([l['pnl_pct'] for l in losses]) if losses else 0.0
 
+        equity = 1.0
+        for r_item in recs: equity *= 1 + r_item['pnl_pct'] / 100
+        tot_ret = (equity - 1) * 100
 
-    print(b("\nClosed-Position Statistics"))
-    print(b("--------------------------------"))
+        print(b("\nClosed-Position Statistics"))
+        print(b("--------------------------------"))
 
-    print(f"Total closed trades   : {b(str(total))}")
-    print(f"Wins (hit target)     : {g(str(len(wins)) if wins else '0')}"
-          f"  |  Avg gain : {g(f'{avg_win:+.2f}%') if wins else '--'}")
-    print(f"Losses / switches     : {r(str(len(losses)) if losses else '0')}"
-          f"  |  Avg loss : {r(f'{avg_los:+.2f}%') if losses else '--'}")
+        print(f"Total closed trades   : {b(str(total))}")
+        print(f"Wins (hit target)     : {g(str(len(wins)) if wins else '0')}"
+              f"  |  Avg gain : {g(f'{avg_win:+.2f}%') if wins else '--'}")
+        print(f"Losses / switches     : {r(str(len(losses)) if losses else '0')}"
+              f"  |  Avg loss : {r(f'{avg_los:+.2f}%') if losses else '--'}")
 
-    win_color = g if win_rt >= 50 else r
-    print(f"Win rate              : {win_color(f'{win_rt:.2f}%')}")
+        win_color = g if win_rt >= 50 else r
+        print(f"Win rate              : {win_color(f'{win_rt:.2f}%')}")
 
-    tot_color = g if tot_ret >= 0 else r
-    print(f"Compounded return     : {tot_color(f'{tot_ret:+.2f}%')}")
+        tot_color = g if tot_ret >= 0 else r
+        print(f"Compounded return     : {tot_color(f'{tot_ret:+.2f}%')}")
 
-    # ── last 10 rows table ──
-    print(b("\nMost recent 10 closed trades:"))
-    for rcd in recs[-10:]:
-        pl_col = g if rcd['pnl_pct'] >= 0 else r
-        print(f"{rcd['exit_date']}  {rcd['symbol']:5}  {rcd['direction']:5} "
-              f"{rcd['status']:6}  PnL {pl_col(f'{rcd['pnl_pct']:+6.2f}%')}")
+        print(b("\nMost recent 10 closed trades:"))
+        for rcd in recs[-10:]:
+            pnl_val_str = f'{rcd["pnl_pct"]:+6.2f}%'
+            pl_col_func = g if rcd['pnl_pct'] >= 0 else r
+            print(f"{rcd['exit_date']}  {rcd['symbol']:5}  {rcd['direction']:5} "
+                  f"{rcd['status']:6}  PnL {pl_col_func(pnl_val_str)}")
 
-    # ── clear option ──
-    if input(Fore.YELLOW + "\n(C)lear stats or Enter to return: " + Style.RESET_ALL).lower() == 'c':
-        save_predictions([p for p in load_predictions() if p['status'] == 'Open'])
-        print(Fore.YELLOW + "History cleared." + Style.RESET_ALL)
-        input("\nPress Enter to return …")
-
+        if input(Fore.YELLOW + "\n(C)lear stats or Enter to return: " + Style.RESET_ALL).lower() == 'c':
+            save_predictions([p for p in load_predictions() if p['status'] == 'Open'])
+            print(Fore.YELLOW + "History cleared." + Style.RESET_ALL)
+            input("\nPress Enter to return …")
 
 
 def interactive_menu():
