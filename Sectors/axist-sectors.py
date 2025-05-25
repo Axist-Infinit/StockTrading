@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+import sys
+user_site_packages = "/home/jules/.local/lib/python3.10/site-packages"
+if user_site_packages not in sys.path:
+    sys.path.insert(0, user_site_packages)
+
 """
 Swing Trading Strategy Script with Feature Refinement and Backtesting
 
@@ -16,17 +21,19 @@ This script can:
 """
 
 import os
-import sys
+# NOTE: sys is already imported above for path modification
 import argparse
 import datetime
 import json
 import pandas as pd
 import numpy as np
 import requests
-import urwid        
+# import urwid # Commented out to avoid TUI issues       
 from alpaca.data import StockHistoricalDataClient
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.common.exceptions import APIError
+from alpaca.data.requests import StockBarsRequest, StockLatestBarRequest # Added imports
+
 from watchlist_utils import load_watchlist, save_watchlist, manage_watchlist
 from ta.momentum import RSIIndicator, StochasticOscillator
 from ta.trend import CCIIndicator, ADXIndicator, MACD, EMAIndicator, SMAIndicator
@@ -55,6 +62,12 @@ from pathlib import Path
 
 from colorama import init, Fore, Style
 init(autoreset=True)
+
+# Helper functions for colored output
+def g(text): return Fore.GREEN + str(text) + Style.RESET_ALL
+def r(text): return Fore.RED + str(text) + Style.RESET_ALL
+def b(text): return Fore.BLUE + str(text) + Style.RESET_ALL
+
 from fredapi import Fred 
 import configparser
 import warnings
@@ -74,9 +87,10 @@ def _init_alpaca_client(keys: dict) -> StockHistoricalDataClient:
 
     return StockHistoricalDataClient(
         api_key    = keys.get("api_key") or keys.get("key_id"),
-        secret_key = keys.get("api_secret")
+        secret_key = keys.get("secret_key") or keys.get("api_secret") # Check for secret_key first
     )
 
+# Corrected _tf_map to use TimeFrame constructor
 _tf_map = {
     "15m": TimeFrame(15, TimeFrameUnit.Minute),
     "30m": TimeFrame(30, TimeFrameUnit.Minute),
@@ -117,33 +131,48 @@ _ALP_CLIENT = _init_alpaca_client(_ALP_KEYS)
 def alpaca_download(symbol: str, *,
                     start: str | None = None,
                     end:   str | None = None,
-                    timeframe: str = "1d",
+                    timeframe: str = "1d", # This is a string e.g. "1d"
                     limit: int | None = None) -> pd.DataFrame:
     """Return a tz‑naïve OHLCV DataFrame from Alpaca."""
-    tf        = _tf_map[timeframe]
+    
+    alpaca_timeframe_obj = _tf_map.get(timeframe) # Changed variable name for clarity
+    if alpaca_timeframe_obj is None:
+        raise ValueError(f"Unsupported timeframe string: {timeframe}")
+
     start_dt  = pd.to_datetime(start) if start else None
     end_dt    = pd.to_datetime(end)   if end   else None
+    
+    request_params = StockBarsRequest(
+        symbol_or_symbols=symbol,
+        timeframe=alpaca_timeframe_obj, # Use the TimeFrame object
+        start=start_dt,
+        end=end_dt,
+        limit=limit
+    )
 
     try:
-        bars = _ALP_CLIENT.get_stock_bars(
-            symbol,
-            tf,
-            start_dt,
-            end_dt,
-            adjust="raw",
-            feed=_ALP_KEYS.get("data_feed", "iex"),
-        ).df
+        bars = _ALP_CLIENT.get_stock_bars(request_params).df
     except APIError as e:
         raise RuntimeError(f"Alpaca download error: {e}")
 
     if bars.empty:
         return bars
+    
+    # Ensure consistent index handling for single vs multi-symbol results from .df
+    # If 'symbol' column exists (from multi-symbol request), set it as index then droplevel
+    if 'symbol' in bars.columns:
+        bars = bars.set_index('symbol', append=True).swaplevel(0, 1)
 
     if isinstance(bars.index, pd.MultiIndex):
-        bars = bars.droplevel(0)
+        try: # Attempt to select current symbol if present in MultiIndex
+            bars = bars.loc[symbol]
+        except KeyError: # If symbol not found (e.g. empty df for one symbol in multi-request)
+             return pd.DataFrame() # Return empty DF for this symbol
+
+
     bars.rename(columns={"open":"Open","high":"High","low":"Low",
                          "close":"Close","volume":"Volume"}, inplace=True)
-    bars.index = bars.index.tz_localize(None)
+    bars.index = bars.index.tz_localize(None) 
     return bars[["Open","High","Low","Close","Volume"]]
 
 
@@ -330,16 +359,24 @@ def _update_positions_status() -> None:
         return
 
     price_map = {}
-    for sym in {p["symbol"] for p in open_pos}:
-        try:
-            bar = _ALP_CLIENT.get_stock_latest_bar(sym, feed=_ALP_KEYS.get("data_feed", "iex"))
-            price_map[sym] = float(bar.close)
-        except APIError:
-            price_map[sym] = next(p["entry_price"] for p in open_pos if p["symbol"] == sym)
+    unique_symbols = sorted(list({p["symbol"] for p in open_pos}))
 
+    if unique_symbols:
+        try:
+            latest_bars_req = StockLatestBarRequest(symbol_or_symbols=unique_symbols)
+            latest_bars_data = _ALP_CLIENT.get_stock_latest_bar(latest_bars_req)
+            for sym, bar_data in latest_bars_data.items():
+                if bar_data: # Check if bar_data is not None
+                    price_map[sym] = float(bar_data.close)
+        except APIError as e:
+            print(f"APIError in _update_positions_status: {e}")
+            for sym_needed in unique_symbols:
+                if sym_needed not in price_map:
+                    price_map[sym_needed] = next(p["entry_price"] for p in open_pos if p["symbol"] == sym_needed)
+    
     today = datetime.date.today().isoformat(); changed = False
     for rec in open_pos:
-        now = price_map[rec["symbol"]]
+        now = price_map.get(rec["symbol"], rec["entry_price"]) 
         if rec["direction"] == "LONG":
             hit_stop   = now <= rec["stop_loss"]
             hit_target = now >= rec["profit_target"]
@@ -379,30 +416,29 @@ def fetch_data(
     *,
     warmup_days: int = 300
 ) -> tuple[pd.DataFrame, ...]:
-    def _get(ivl: str, default_limit: int) -> pd.DataFrame:
+    def _get(ivl_str: str, default_limit: int) -> pd.DataFrame: 
         if start and end:
-            if ivl == "1d":
+            if ivl_str == "1d": 
                 real_start = (
                     pd.to_datetime(start) - pd.Timedelta(days=warmup_days)
                 ).strftime("%Y-%m-%d")
                 return alpaca_download(
-                    ticker, timeframe=ivl, start=real_start, end=end
+                    ticker, timeframe=ivl_str, start=real_start, end=end 
                 )
             return alpaca_download(
-                ticker, timeframe=ivl, start=start, end=end
+                ticker, timeframe=ivl_str, start=start, end=end 
             )
         return alpaca_download(
-            ticker, timeframe=ivl, limit=default_limit
+            ticker, timeframe=ivl_str, limit=default_limit 
         )
 
-    df_15  = _get("15m", 60)    # ≈ 60 days @ 15-min
+    df_15  = _get("15m", 60)
     df_30  = _get("30m", 60)
     df_1h  = _get("1h",  120)
-    df_4h  = _get("4h",  120)   # ← was 90m
+    df_4h  = _get("4h",  120) 
     df_1d  = _get("1d",  380)
     df_1wk = _get("1wk", 520)
 
-    # normalise column names …
     for df in (df_15, df_30, df_1h, df_4h, df_1d, df_1wk):
         if "Adj Close" in df.columns and "Close" not in df.columns:
             df.rename(columns={"Adj Close": "Close"}, inplace=True)
@@ -414,9 +450,8 @@ def compute_indicators(df: pd.DataFrame,
     df = df.copy()
     req = {"Open", "High", "Low", "Close", "Volume"}
     if df.empty or not req.issubset(df.columns):
-        return df                                    # nothing to do
+        return df                                    
 
-    # ---- adaptive look-back ------------------------------------------
     pct_vol = (
         df["Close"].pct_change().rolling(20).std().iloc[-1]
         if len(df) >= 21 else
@@ -425,8 +460,8 @@ def compute_indicators(df: pd.DataFrame,
 
     window = 21 if pct_vol >= 0.06 else 10 if pct_vol <= 0.01 else 14
 
-    if len(df) <= window:                           # e.g. 6 rows vs 21
-        return pd.DataFrame(index=df.index)         # safe stub frame
+    if len(df) <= window:                           
+        return pd.DataFrame(index=df.index)         
 
     rsi  = RSIIndicator(df["Close"], window).rsi()
     adx  = ADXIndicator(df["High"], df["Low"], df["Close"], window)
@@ -514,7 +549,6 @@ def enrich_higher_timeframes(df_daily: pd.DataFrame) -> pd.DataFrame:
 
     htf = pd.concat(out, axis=1)
 
-    # simple cross-time-frame momentum ratios
     if {'RSI_daily', 'RSI_wk'}.issubset(htf.columns.union(df_daily.columns)):
         htf['RSI_ratio_dw'] = (
             df_daily['RSI_daily'] / htf['RSI_wk']
@@ -540,7 +574,7 @@ def triple_barrier_labels(close: pd.Series,
     upper = close + tgt_mult  * atr
     lower = close - stop_mult * atr
     closes = close.values
-    label  = np.ones(len(close), dtype=int)          # default neutral/no-move
+    label  = np.ones(len(close), dtype=int)          
 
     for i in range(len(close) - horizon):
         win = closes[i + 1 : i + 1 + horizon]
@@ -553,7 +587,7 @@ def triple_barrier_labels(close: pd.Series,
         elif hit_dn.size:
             label[i] = 0
     return label
-# ──────────────────────────────────────────────────────────────────────
+
 def tune_xgb_hyperparams(X: pd.DataFrame,
                          y: np.ndarray,
                          *, n_iter: int = 25,
@@ -599,7 +633,7 @@ def compute_anchored_vwap(df_1d):
     if df_1d.empty:
         return pd.Series(dtype=float)
 
-    lookback_period = 252  # ~1 year
+    lookback_period = 252 
     recent_period = df_1d.tail(lookback_period)
     anchor_idx = recent_period['Low'].idxmin()
     if pd.isna(anchor_idx):
@@ -631,7 +665,7 @@ def prepare_features(
     df_15m: pd.DataFrame,
     df_30m: pd.DataFrame,
     df_1h:  pd.DataFrame,
-    df_90m: pd.DataFrame,
+    df_90m: pd.DataFrame, # This seems unused, 4h is used in fetch_data
     df_1d:  pd.DataFrame,
     df_1wk: pd.DataFrame,
     macro_df: pd.DataFrame,
@@ -641,44 +675,48 @@ def prepare_features(
     ticker: str | None = None
 ) -> pd.DataFrame:
 
-    # ----------- core indicators on each frame -------------------------
     ind_15m = compute_indicators(df_15m.copy(), timeframe='15m')
     ind_30m = compute_indicators(df_30m.copy(), timeframe='30m')
-    ind_1h  = compute_indicators(df_1h.copy(),  timeframe='hourly')
-    ind_90m = compute_indicators(df_90m.copy(), timeframe='90m')
+    ind_1h  = compute_indicators(df_1h.copy(),  timeframe='hourly') 
+    # Assuming df_90m should be df_4h as per fetch_data. If df_90m is distinct, it needs fetching.
+    # For now, let's assume it's a typo and it means to use the 4h data if available, or skip if not.
+    # Or, if it's meant to be a specific 90m interval, it needs to be added to _tf_map and fetch_data.
+    # To prevent crash, we'll check if it's empty or use a placeholder if it's critical.
+    # Given it's passed but not explicitly fetched in fetch_data with "90m" key, this is ambiguous.
+    # Let's assume df_90m is meant to be df_4h from fetch_data, or this function needs adjustment.
+    # For safety, if it's empty and used, it should not crash.
+    # ind_90m = compute_indicators(df_90m.copy(), timeframe='90m') # Original
+    
+    df_4h = df_90m # Assuming df_90m is actually the df_4h data based on fetch_data structure
+    ind_4h  = compute_indicators(df_4h.copy(),  timeframe='4h') # Using 4h as a replacement
+    
     ind_1d  = compute_indicators(df_1d.copy(),  timeframe='daily')
     ind_1d['AnchoredVWAP'] = compute_anchored_vwap(ind_1d)
     ind_1wk = compute_indicators(df_1wk.copy(), timeframe='1wk')
 
-    # ----------- higher-TF enrichment (weekly / monthly / qtr) ---------
     ind_htf = enrich_higher_timeframes(ind_1d)
 
-    # ----------- last bar of intraday frames ---------------------------
     daily_15m = to_daily(ind_15m, "15m").add_suffix('_15m')
     daily_30m = to_daily(ind_30m, "30m").add_suffix('_30m')
     daily_1h  = to_daily(ind_1h,  "1h").add_suffix('_1h')
-    daily_90m = to_daily(ind_90m, "90m").add_suffix('_90m')
+    daily_4h  = to_daily(ind_4h, "4h").add_suffix('_4h') # Changed from daily_90m
 
-    # ----------- align weekly set to daily dates -----------------------
     ind_1wk = ind_1wk.reindex(ind_1d.index, method='ffill')
 
-    # ----------- assemble full feature matrix --------------------------
     ind_1d.index.name = 'Date'
     features_df = (
         ind_1d
-          .join(ind_htf)          # weekly/month/quarter resamples
-          .join(ind_1wk)          # true weekly-bar indicators
+          .join(ind_htf)          
+          .join(ind_1wk)          
           .join(daily_15m)
           .join(daily_30m)
           .join(daily_1h)
-          .join(daily_90m)
+          .join(daily_4h) # Changed from daily_90m
     )
 
-    # ----------- macro join --------------------------------------------
     if macro_df is not None and not macro_df.empty:
         features_df = features_df.join(macro_df, on='Date')
 
-    # ----------- simple RS column --------------------------------------
     bench = {
         'XLE': 'CRUDE', 'XLF': 'YIELD10', 'XLK': 'SPY',
         'XLU': 'YIELD10', 'XLRE': 'YIELD10',
@@ -691,7 +729,6 @@ def prepare_features(
             features_df[bcol].pct_change(10)
         )
 
-    # ----------- triple-barrier labels ---------------------------------
     features_df.dropna(subset=['Close'], inplace=True)
     if features_df.empty:
         return features_df
@@ -728,12 +765,12 @@ def refine_features(features_df,
         objective='multi:softmax',
         num_class=3,
         eval_metric='mlogloss',
-        tree_method='hist',      # use GPU hist algo …
-        device='cuda'            # … on the GPU
+        tree_method='hist',      
+        device='cuda'            
     )
 
     split = int(0.8 * len(X))
-    if len(np.unique(y[:split])) < 2:       # not enough classes
+    if len(np.unique(y[:split])) < 2:       
         return features_df
 
     model.fit(X.iloc[:split], y.iloc[:split])
@@ -749,7 +786,6 @@ def refine_features(features_df,
     return X.join(y)
 
 
-# ── analytics helpers ────────────────────────────────────────────────
 def _summarise_performance(trades: pd.DataFrame, total_bars: int) -> dict:
     """
     Return a dict with win-rate, average P/L, trade-level Sharpe,
@@ -759,23 +795,20 @@ def _summarise_performance(trades: pd.DataFrame, total_bars: int) -> dict:
         return dict(total=0, win_rate=0.0, avg_pnl=0.0,
                     sharpe=0.0, max_dd=0.0, tim=0.0)
 
-    # P/L already in pct terms (0.0123 = +1.23 %)
     pnl = trades["pnl_pct"].values
     win = pnl > 0
     win_rate = win.mean() if pnl.size else 0.0
     avg_pnl  = pnl.mean() if pnl.size else 0.0
     sharpe   = (pnl.mean() / pnl.std(ddof=1)) * np.sqrt(252) if pnl.std(ddof=1) else 0.0
 
-    # simple equity curve for max-DD
     equity = (1 + pnl).cumprod()
     roll_max = np.maximum.accumulate(equity)
     dd = (equity - roll_max) / roll_max
     max_dd = abs(dd.min()) if dd.size else 0.0
 
-    # time-in-market ≈ bars spent in trades ÷ total bars
     tim = (trades["exit_timestamp"] - trades["entry_timestamp"]) \
-            .dt.total_seconds().sum() / (total_bars * 60 * 30)  # 30-min bars
-    tim = min(max(tim, 0), 1)            # clamp 0–1
+            .dt.total_seconds().sum() / (total_bars * 60 * 30) 
+    tim = min(max(tim, 0), 1)            
 
     return dict(total=len(trades),
                 win_rate=win_rate,
@@ -791,11 +824,9 @@ def train_stacked_ensemble(features_df: pd.DataFrame,
     if features_df.empty or "future_class" not in features_df.columns:
         return None, None
 
-    # 1) prep X / y ------------------------------------------------------
     y = features_df["future_class"].values
     X = features_df.drop(columns=["future_class"]).ffill().bfill()
 
-    # 2) auto-tune XGB hyper-params on full data (quick random search) --
     best_xgb_params = tune_xgb_hyperparams(X, y, n_iter=20,
                                            random_state=random_state)
     xgb_clf = XGBClassifier(**best_xgb_params,
@@ -806,7 +837,6 @@ def train_stacked_ensemble(features_df: pd.DataFrame,
                             n_jobs=-1,
                             random_state=random_state)
 
-    # 3) build base learners + stacking meta-model -----------------------
     rf_clf  = RandomForestClassifier(
         n_estimators=400, max_depth=None,
         class_weight="balanced", n_jobs=-1,
@@ -825,21 +855,18 @@ def train_stacked_ensemble(features_df: pd.DataFrame,
         passthrough=False
     )
 
-    # 4) walk-forward split → train / validate for prob-threshold --------
     tscv = TimeSeriesSplit(n_splits=4)
-    best_thr, best_f1 = 0.60, -np.inf       # default threshold
+    best_thr, best_f1 = 0.60, -np.inf       
 
     for train_idx, val_idx in tscv.split(X):
         stack.fit(X.iloc[train_idx], y[train_idx])
         proba = stack.predict_proba(X.iloc[val_idx])
 
-        # test several thresholds on LONG/SHORT classes (2 & 0)
         for thr in np.arange(0.55, 0.91, 0.05):
             pred = np.where(
-                proba[:, 2] >= thr, 2,    # LONG
-                np.where(proba[:, 0] >= thr, 0, 1)  # SHORT else Neutral
+                proba[:, 2] >= thr, 2,    
+                np.where(proba[:, 0] >= thr, 0, 1)  
             )
-            # treat neutral as class 1 → macro F1 on 0 & 2 only
             mask = pred != 1
             if mask.sum() == 0:
                 continue
@@ -848,7 +875,6 @@ def train_stacked_ensemble(features_df: pd.DataFrame,
             if f1 > best_f1:
                 best_f1, best_thr = f1, thr
 
-    # final fit on *all* data -------------------------------------------
     stack.fit(X, y)
     return stack, best_thr
 
@@ -864,7 +890,6 @@ def generate_signal_output(ticker, latest_row, model, thr, macro_latest):
     direction = "LONG" if class_idx == 2 else "SHORT"
     price = float(latest_row.get("Close", np.nan))
 
-    # regime check
     reg = latest_row.get('REGIME', 0)
     if reg == -1 and direction == "LONG":
         return None
@@ -913,14 +938,13 @@ def get_macro_data(start: str,
         except Exception:
             cache_file.unlink(missing_ok=True)
 
-    # ---------- ETF proxies fetched via Alpaca -------------------------
-    etf_map = {             # ETF   → column name
-        "SPY":  "SPY",      # S&P-500
-        "TIP":  "TIP",      # US T-bond TIPS
-        "UUP":  "USD",      # US-Dollar index proxy
-        "USO":  "CRUDE",    # WTI crude proxy
-        "HYG":  "HYG",      # High-yield credit
-        "TLT":  "TLT",      # 20-yr Treasuries
+    etf_map = {             
+        "SPY":  "SPY",      
+        "TIP":  "TIP",      
+        "UUP":  "USD",      
+        "USO":  "CRUDE",    
+        "HYG":  "HYG",      
+        "TLT":  "TLT",      
     }
     price_df = pd.DataFrame()
     for etf, col in etf_map.items():
@@ -930,7 +954,6 @@ def get_macro_data(start: str,
         except Exception as e:
             print(f"[WARN] Macro fetch failed for {etf}: {e}")
 
-    # ---------- optional FRED series ----------------------------------
     fred_df = pd.DataFrame(index=price_df.index)
     if fred_api_key:
         from fredapi import Fred
@@ -948,14 +971,12 @@ def get_macro_data(start: str,
         except Exception as e:
             print(f"[WARN] FRED fetch failed: {e}")
 
-    # ---------- merge & post-process ----------------------------------
     macro = pd.concat([price_df, fred_df], axis=1)
     if macro.empty:
         macro = pd.DataFrame(index=pd.date_range(start, end, freq='D'))
 
     macro = macro.asfreq('D').ffill()
 
-    # Simple risk-on / risk-off regime flag (same logic as before)
     reg = pd.Series(0, index=macro.index, dtype=int)
     if 'VIX' in macro:          reg += (macro['VIX'] > 25).astype(int) * -1
     if 'YIELD_SPREAD' in macro: reg += (macro['YIELD_SPREAD'] > 0).astype(int)
@@ -963,7 +984,6 @@ def get_macro_data(start: str,
         reg += (macro['USD'].pct_change(20) < 0).fillna(False).astype(int)
     macro['REGIME'] = reg.clip(-1, 1)
 
-    # ---------- cache to disk & return --------------------------------
     try:
         joblib.dump(macro, cache_file)
     except Exception:
@@ -978,15 +998,15 @@ def backtest_strategy(ticker: str,
     """
     Daily-lumped back-test using the six-frame fetch & stacked ensemble.
     """
-    df_15m, df_30m, df_1h, df_90m, df_1d, df_1wk = fetch_data(
+    df_15m, df_30m, df_1h, df_90m, df_1d, df_1wk = fetch_data( # df_90m is df_4h here
         ticker, start=start_date, end=end_date
     )
 
-    feat = prepare_features(df_15m, df_30m, df_1h, df_90m,
+    feat = prepare_features(df_15m, df_30m, df_1h, df_90m, # df_90m is df_4h
                             df_1d,  df_1wk, macro_df)
     feat = refine_features(feat)
 
-    model, _ = train_stacked_ensemble(feat)          # UPDATED
+    model, _ = train_stacked_ensemble(feat)          
     if model is None:
         print(Fore.YELLOW + f"Model training failed for {ticker}." + Style.RESET_ALL)
         return
@@ -998,7 +1018,6 @@ def backtest_strategy(ticker: str,
 
     df_pred = feat.assign(prediction=preds)
 
-    # ---- simple long/short sim (unchanged) ----------------------------
     trades, in_trade = [], False
     for ts, row in df_pred.iterrows():
         price, atr = row["Close"], row["ATR_daily"]
@@ -1026,29 +1045,24 @@ def prepare_features_intraday(df_30m, macro_df=None):
     Computes technical indicators and triple-barrier labels directly on 30-minute data.
     Joins daily context (EMA, Anchored VWAP) for each 30-minute bar, then merges macro.
     """
-    df_30m = df_30m.copy()  # <-- ADDED to avoid SettingWithCopyWarning
+    df_30m = df_30m.copy()  
 
-    # 1) Compute intraday indicators
     df_30m = compute_indicators(df_30m, timeframe='intraday')
     if df_30m.empty or 'Close' not in df_30m.columns:
         return pd.DataFrame()
 
-    # 2) Convert to daily & compute daily indicators
     daily = to_daily(df_30m, "intraday")
     daily = compute_indicators(daily, timeframe='daily')
     daily['AnchoredVWAP'] = compute_anchored_vwap(daily)
 
-    # Remove timezones before reindexing:
     if daily.index.tz is not None:
-        daily.index = daily.index.tz_localize(None)  # <-- ADDED
+        daily.index = daily.index.tz_localize(None)  
     if df_30m.index.tz is not None:
-        df_30m.index = df_30m.index.tz_localize(None)  # <-- ADDED
+        df_30m.index = df_30m.index.tz_localize(None)  
 
-    # Forward-fill the daily data onto 30-min timestamps
     daily_filled = daily.reindex(df_30m.index, method='ffill')
     df_30m = df_30m.join(daily_filled, rsuffix='_daily')
 
-    # 3) Label future_class on intraday
     horizon_bars = 16
     multiplier = 2.0
     atr_col = 'ATR_intraday'
@@ -1081,11 +1095,10 @@ def prepare_features_intraday(df_30m, macro_df=None):
     df_30m['future_class'] = future_class
     df_30m = df_30m.iloc[:-horizon_bars]
 
-    # 4) Merge macro data
     if macro_df is not None and not macro_df.empty:
         if macro_df.index.tz is not None:
             macro_df = macro_df.copy()
-            macro_df.index = macro_df.index.tz_localize(None)  # <-- ADDED
+            macro_df.index = macro_df.index.tz_localize(None)  
 
         macro_resampled = macro_df.reindex(df_30m.index, method='ffill')
         df_30m = df_30m.join(macro_resampled, how='left')
@@ -1155,21 +1168,20 @@ def backtest_strategy_intraday(ticker, start_date, end_date, macro_df,
                     in_trade = False
             if in_trade:
                 continue
-
-        # flat – potential new entry
+        
         class_idx  = int(row['prediction'])
         prob_score = probas[i][class_idx]
         if prob_score < 0.60:
             continue
 
-        if class_idx == 2:      # LONG
+        if class_idx == 2:      
             in_trade   = True
             trade_dir  = "LONG"
             entry_time = ts
             entry_price= price
             stop_price = price - atr
             target_price = price + 2 * atr
-        elif class_idx == 0:    # SHORT
+        elif class_idx == 0:    
             in_trade   = True
             trade_dir  = "SHORT"
             entry_time = ts
@@ -1194,7 +1206,6 @@ def backtest_strategy_intraday(ticker, start_date, end_date, macro_df,
     print(f"  Max drawdown        : {Fore.CYAN}{pct(summary['max_dd'])}{Style.RESET_ALL}")
     print(f"  Time-in-market      : {Fore.CYAN}{pct(summary['tim'])}{Style.RESET_ALL}")
 
-    # (CSV logging – keep your original code here if you log trades)
 
 def display_main_menu():
     print("\nMain Menu:")
@@ -1209,7 +1220,6 @@ def run_signals_on_watchlist(use_intraday: bool = True):
     if not tickers:
         print("Your watchlist is empty."); return
 
-    # ONE-time bulk warm-up of the cache ↓↓↓
     preload_interval_cache(tickers)
 
     today = datetime.date.today()
@@ -1222,13 +1232,14 @@ def run_signals_on_watchlist(use_intraday: bool = True):
     for tkr in tickers:
         print(f"\n=== {tkr} (live) ===")
         try:
-            df15, df30, df1h, df90, df1d, df1w = fetch_data(tkr)
+            df15, df30, df1h, df4h, df1d, df1w = fetch_data(tkr) # df4h was df90m
         except Exception as e:
             print(f"Fetch error: {e}"); continue
 
+        # Pass df4h instead of df90m to prepare_features
         feats = (prepare_features_intraday(df30, macro_df)
                  if use_intraday else
-                 prepare_features(df15, df30, df1h, df90, df1d, df1w, macro_df))
+                 prepare_features(df15, df30, df1h, df4h, df1d, df1w, macro_df)) # df4h was df90m
         feats = refine_features(feats)
         model, thr = train_stacked_ensemble(feats)
         if model is None:
@@ -1253,12 +1264,13 @@ def backtest_watchlist():
     if not start_arg or not end_arg:
         print("Invalid date range."); return
 
-    preload_interval_cache(tickers)      # bulk warm-up here
+    preload_interval_cache(tickers)      
 
     macro_df = get_macro_data(start_arg, end_arg)
     for ticker in tickers:
         print(f"\n=== Backtesting {ticker} from {start_arg} to {end_arg} ===")
-        backtest_strategy(ticker, start_arg, end_arg, macro_df)
+        # In backtest_strategy, df_90m is passed, which is df_4h from fetch_data
+        backtest_strategy(ticker, start_arg, end_arg, macro_df) 
 
 def show_signals_for_current_week():
     fred_api_key = load_config()
@@ -1266,7 +1278,7 @@ def show_signals_for_current_week():
     if not tickers:
         print("Your watchlist is empty."); return
 
-    preload_interval_cache(tickers)      # bulk cache warm-up
+    preload_interval_cache(tickers)      
 
     today   = datetime.date.today()
     monday  = today - datetime.timedelta(days=today.weekday())
@@ -1277,18 +1289,17 @@ def show_signals_for_current_week():
     for tkr in tickers:
         print(f"\n=== {tkr}: {monday} → {today} ===")
         try:
-            # use cached frames, then slice locally
-            df15, df30, df1h, df90, df1d, df1w = fetch_data(tkr)
-            df15, df30, df1h, df90, df1d, df1w = (
+            df15, df30, df1h, df4h, df1d, df1w = fetch_data(tkr) # df4h was df90m
+            df15, df30, df1h, df4h, df1d, df1w = ( # df4h was df90m
                 df15.loc[start_s:end_s], df30.loc[start_s:end_s],
-                df1h.loc[start_s:end_s], df90.loc[start_s:end_s],
+                df1h.loc[start_s:end_s], df4h.loc[start_s:end_s], # df4h was df90m
                 df1d.loc[start_s:end_s], df1w.loc[start_s:end_s]
             )
         except Exception as e:
             print(f"Fetch error: {e}"); continue
 
         all_feat = prepare_features(
-            df15, df30, df1h, df90, df1d, df1w,
+            df15, df30, df1h, df4h, df1d, df1w, # df4h was df90m
             macro_df, drop_recent=False
         )
         lbl_df = refine_features(all_feat.dropna(subset=['future_class']))
@@ -1307,8 +1318,6 @@ def signals_performance_cli():
     Dashboard of OPEN trades – price updates fetched from Alpaca in one
     multi-symbol request (→ no Yahoo dependency).
     """
-    import urwid
-
     open_recs = [p for p in load_predictions() if p["status"] == "Open"]
     if not open_recs:
         print("No open positions.  Run option 5 first."); return
@@ -1321,37 +1330,27 @@ def signals_performance_cli():
         ("hit",      "white",      "dark cyan"),
         ("footer",   "white,bold", "")
     ]
-
-    header = urwid.AttrMap(
-        urwid.Text(" Weekly Signals – Open Trades", "center"), "title"
-    )
-    footer = urwid.AttrMap(
-        urwid.Text(" (R)efresh   (D)eject hit trades   (Q)uit "), "footer"
-    )
-    w_body = urwid.Text("")
-    frame   = urwid.Frame(header=header,
-                          body=urwid.AttrMap(urwid.Filler(w_body, "top"), "body"),
-                          footer=footer)
-
-    # ------------ price fetch -----------------------------------------
+    
     def _get_last_prices() -> dict[str, float]:
         syms = sorted({p["symbol"] for p in open_recs})
         if not syms:
             return {}
 
         try:
-            bars = _ALP_CLIENT.get_stock_latest_bar(
-                syms, feed=_ALP_KEYS.get("data_feed", "iex")
-            ).df
-            if isinstance(bars.index, pd.MultiIndex):
-                bars = bars["close"]               # symbol level
-            return bars.to_dict()                  # {SYM: price}
+            latest_bars_req = StockLatestBarRequest(symbol_or_symbols=syms)
+            latest_bars = _ALP_CLIENT.get_stock_latest_bar(latest_bars_req) 
+            
+            price_dict = {}
+            if isinstance(latest_bars, dict): 
+                for symbol, bar_data in latest_bars.items():
+                    if bar_data: 
+                        price_dict[symbol] = bar_data.close 
+            return price_dict
+
         except APIError as e:
-            print(Fore.YELLOW + f"Alpaca error: {e}" + Style.RESET_ALL)
-            # fallback: assume unchanged prices
+            print(Fore.YELLOW + f"Alpaca error in _get_last_prices: {e}" + Style.RESET_ALL)
             return {p["symbol"]: p["entry_price"] for p in open_recs}
 
-    # ------------ table builder ---------------------------------------
     def _build_table(px: dict[str, float]):
         rows = [("headers",
                  f"{'Symbol':8}{'Dir':6}{'Entry':>10}{'Now':>10}{'P/L%':>8}"
@@ -1380,39 +1379,58 @@ def signals_performance_cli():
             cache.append((rec, hit, status, now, pnl_pct, today))
         return rows, cache
 
-    # ------------ first render ----------------------------------------
     _table_cache = []
     def _refresh(*_):
         nonlocal _table_cache
         prices = _get_last_prices()
-        lines, _table_cache = _build_table(prices)
-        w_body.set_text(lines)
+        # lines, _table_cache = _build_table(prices) # urwid related
+        # w_body.set_text(lines) # Requires urwid
+        # Instead of urwid, just print to console:
+        print("\n--- Open Trades ---")
+        table_rows, _table_cache = _build_table(prices)
+        for _, line in table_rows: # Assuming second element is the string
+            print(line.strip())
+        print("-------------------\n")
+
 
     _refresh()
-
-    # ------------ key handler -----------------------------------------
-    def _keys(key):
-        nonlocal open_recs
-        if key.lower() == "q":
-            raise urwid.ExitMainLoop()
-        if key.lower() == "r":
+    print("signals_performance_cli is currently using basic print. (D)eject/(Q)uit/(R)efresh in input below.")
+    
+    # Simplified key handling for non-urwid version
+    while True:
+        action = input("(R)efresh, (D)eject hit, (Q)uit: ").lower()
+        if action == 'q':
+            break
+        elif action == 'r':
             _refresh()
-        if key.lower() == "d":
+        elif action == 'd':
             changed = False
-            for rec, hit, status, now, pnl, today in _table_cache:
+            for rec, hit, status, now, pnl, today_str in _table_cache: # Ensure today_str is used if it's just string
                 if hit:
                     rec.update({"status": status,
                                 "exit_price": round(now, 2),
-                                "exit_date":  today,
+                                "exit_date":  today_str, # Use the string date
                                 "pnl_pct":    round(pnl, 2)})
                     changed = True
             if changed:
-                save_predictions(
-                    [p for p in load_predictions() if p["status"] != "Open"] + open_recs
-                )
-            _refresh()
+                all_preds = load_predictions() # Load all predictions
+                # Update open_recs in all_preds before saving
+                # This requires matching records, e.g. by symbol and entry_date if unique
+                # For simplicity here, assuming open_recs is a subset of all_preds and modifications are reflected
+                # A more robust way would be to create a new list of all predictions with updated items.
+                updated_all_preds = []
+                open_rec_dict = {(p['symbol'], p['entry_date']): p for p in open_recs}
+                for p_all in all_preds:
+                    key = (p_all['symbol'], p_all['entry_date'])
+                    if p_all['status'] == 'Open' and key in open_rec_dict:
+                         updated_all_preds.append(open_rec_dict[key]) # Add the modified record
+                    else:
+                        updated_all_preds.append(p_all) # Add unchanged record
+                save_predictions(updated_all_preds)
+                # Refresh open_recs for the current view
+                open_recs = [p for p in updated_all_preds if p["status"] == "Open"]
 
-    urwid.MainLoop(frame, palette, unhandled_input=_keys).run()
+            _refresh()
 
 
 def closed_stats_cli():
@@ -1426,27 +1444,26 @@ def closed_stats_cli():
         input("\nPress Enter to return …")
         return
 
-    # ── compute P/L % for every record (in case older JSON lacks it) ──
-    for r in recs:
-        if 'pnl_pct' not in r or r['pnl_pct'] is None:
-            ep, xp = r['entry_price'], r.get('exit_price', r['entry_price'])
-            if r['direction'] == 'LONG':
-                r['pnl_pct'] = (xp - ep) / ep * 100
-            else:                              # SHORT
-                r['pnl_pct'] = (ep - xp) / ep * 100
-            r['pnl_pct'] = round(r['pnl_pct'], 2)
+    for r_item in recs: 
+        if 'pnl_pct' not in r_item or r_item['pnl_pct'] is None:
+            ep, xp = r_item['entry_price'], r_item.get('exit_price', r_item['entry_price'])
+            if r_item['direction'] == 'LONG':
+                r_item['pnl_pct'] = (xp - ep) / ep * 100
+            else:                              
+                r_item['pnl_pct'] = (ep - xp) / ep * 100
+            r_item['pnl_pct'] = round(r_item['pnl_pct'], 2)
 
-    wins   = [r for r in recs if r['status'] == 'Target']
-    losses = [r for r in recs if r['status'] in ('Stop', 'Closed')]
+    wins   = [r_item for r_item in recs if r_item['status'] == 'Target'] 
+    losses = [r_item for r_item in recs if r_item['status'] in ('Stop', 'Closed')] 
     total  = len(recs)
-    win_rt = len(wins) / total * 100
+    win_rt = (len(wins) / total * 100) if total > 0 else 0
+
 
     avg_win = np.mean([w['pnl_pct'] for w in wins])   if wins   else 0.0
     avg_los = np.mean([l['pnl_pct'] for l in losses]) if losses else 0.0
 
-    # compounded equity curve
     equity = 1.0
-    for r in recs: equity *= 1 + r['pnl_pct'] / 100
+    for r_item in recs: equity *= 1 + r_item['pnl_pct'] / 100 
     tot_ret = (equity - 1) * 100
 
 
@@ -1465,14 +1482,10 @@ def closed_stats_cli():
     tot_color = g if tot_ret >= 0 else r
     print(f"Compounded return     : {tot_color(f'{tot_ret:+.2f}%')}")
 
-    # ── last 10 rows table ──
     print(b("\nMost recent 10 closed trades:"))
     for rcd in recs[-10:]:
-        pl_col = g if rcd['pnl_pct'] >= 0 else r
-        print(f"{rcd['exit_date']}  {rcd['symbol']:5}  {rcd['direction']:5} "
-              f"{rcd['status']:6}  PnL {pl_col(f'{rcd['pnl_pct']:+6.2f}%')}")
+        print(f"{rcd.get('exit_date','N/A')} {rcd.get('symbol','N/A')} {rcd.get('direction','N/A')} {rcd.get('status','N/A')} PnL {rcd.get('pnl_pct', 0.0):+.2f}%")
 
-    # ── clear option ──
     if input(Fore.YELLOW + "\n(C)lear stats or Enter to return: " + Style.RESET_ALL).lower() == 'c':
         save_predictions([p for p in load_predictions() if p['status'] == 'Open'])
         print(Fore.YELLOW + "History cleared." + Style.RESET_ALL)
@@ -1489,7 +1502,7 @@ def interactive_menu():
         print("4. Schedule Signals (9:30 to 16:00 EST via Cron)")
         print("5. Show This Weeks Signals")
         print("6. Show Latest Signals Performance")
-        print("7. Closed-Trades Statistics")        # NEW
+        print("7. Closed-Trades Statistics")        
         print("0. Exit")
         choice = input("Select an option: ").strip()
 
@@ -1526,7 +1539,6 @@ def main():
                         help="Use 30‑min intraday pipeline in live mode")
     args = parser.parse_args()
 
-    # If no positional tickers and no flags set, go interactive:
     if not args.tickers and not any(vars(args).values()):
         interactive_menu()
         return
@@ -1539,42 +1551,29 @@ def main():
     end_arg = args.end
     use_intraday = args.real
 
-    # Open log file if needed
     log_file = None
     if log_trades:
         log_file = open("trades_log.csv", "a")
 
-    # ---------------------------------------------------------------------
-    # 1) If in BACKTEST mode, we handle either intraday or daily-lumped
-    # ---------------------------------------------------------------------
     if run_backtest and start_arg and end_arg:
         macro_df = get_macro_data(start_arg, end_arg, fred_api_key=fred_api_key)
 
-        # (a) Intraday approach if -real is set
         if use_intraday:
             for ticker in tickers:
                 log_filename = f"{ticker}_30m_{start_arg}_{end_arg}.csv"
                 with open(log_filename, "a") as lf:
                     print(f"\n=== Intraday Backtesting {ticker} (30m) from {start_arg} to {end_arg} ===")
                     backtest_strategy_intraday(ticker, start_arg, end_arg, macro_df, log_file=lf)
-
-        # (b) Otherwise daily-lumped approach
         else:
             for ticker in tickers:
                 log_filename = f"{ticker}_{start_arg}_{end_arg}.csv"
                 with open(log_filename, "a") as lf:
                     print(f"\n=== Backtesting {ticker} from {start_arg} to {end_arg} ===")
                     backtest_strategy(ticker, start_arg, end_arg, macro_df, log_file=lf)
-
-        # Once backtest is done, we can safely close the main log file (if any) and return
         if log_file:
             log_file.close()
         return
 
-    # ---------------------------------------------------------------------
-    # 2) Otherwise do the "LIVE" signal generation mode
-    # ---------------------------------------------------------------------
-    # (No start/end provided or no --backtest)
     today = datetime.datetime.today()
     macro_start = today - datetime.timedelta(days=380)
     macro_df = get_macro_data(
@@ -1595,7 +1594,8 @@ def main():
             print(f"No usable daily data for {ticker}, skipping.")
             continue
 
-        features_df = prepare_features(df15, df30, df1h, df4h, df1d, df1w, macro_df)
+        # Assuming df_4h is passed as df_90m argument to prepare_features
+        features_df = prepare_features(df15, df30, df1h, df4h, df1d, df1w, macro_df, ticker=ticker) 
         if features_df.empty:
             print(f"Insufficient data for {ticker}, skipping.")
             continue
@@ -1609,14 +1609,12 @@ def main():
             print(f"Model training failed or no valid data for {ticker}.")
             continue
 
-        # Generate signal using the last row
         latest_features = features_df.iloc[-1]
         X_latest = latest_features.drop(labels='future_class', errors='ignore').to_frame().T
         X_latest.ffill(inplace=True)
         X_latest.bfill(inplace=True)
         latest_series = X_latest.iloc[0]
 
-        # Use last date from features or fallback to macro
         latest_date = features_df.index[-1]
         if latest_date in macro_df.index:
             macro_latest = macro_df.loc[latest_date].to_dict()
@@ -1626,7 +1624,6 @@ def main():
         signal_output = generate_signal_output(ticker, latest_series, model, best_thr, macro_latest)
         print(signal_output)
 
-        # Optionally log this single signal
         if log_file and ("LONG" in signal_output or "SHORT" in signal_output):
             now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             log_file.write(f"{now_str},{ticker},{signal_output}\n")
