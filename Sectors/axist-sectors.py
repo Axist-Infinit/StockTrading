@@ -128,6 +128,7 @@ _ALP_KEYS   = load_config("ALPACA")           # may be {} if section absent
 _ALP_CLIENT = _init_alpaca_client(_ALP_KEYS)
 # ─────────────────────────────────────────────────────────────────────
 
+
 def alpaca_download(symbol: str, *,
                     start: str | None = None,
                     end:   str | None = None,
@@ -175,6 +176,19 @@ def alpaca_download(symbol: str, *,
     bars.index = bars.index.tz_localize(None) 
     return bars[["Open","High","Low","Close","Volume"]]
 
+_API_CALL_COUNT = 0
+
+def _inc_api_calls(n: int = 1) -> None:
+    """Increment the global counter each time we hit the Alpaca REST API."""
+    global _API_CALL_COUNT
+    _API_CALL_COUNT += n
+
+def reset_api_call_count() -> None:
+    global _API_CALL_COUNT
+    _API_CALL_COUNT = 0
+
+def get_api_call_count() -> int:
+    return _API_CALL_COUNT
 
 def _wait_for_token():
     """
@@ -528,38 +542,44 @@ def compute_indicators(df: pd.DataFrame,
     return df
 
 def enrich_higher_timeframes(df_daily: pd.DataFrame) -> pd.DataFrame:
-    """
-    Add higher-time-frame (weekly, monthly, quarterly) technical indicators
-    and basic cross-time-frame ratios.
+    # ── safety guards ────────────────────────────────────────────────────
+    if df_daily.empty:
+        return pd.DataFrame()
 
-    Returns a DataFrame *aligned to daily index* with suffixes:
-        _wk   – weekly
-        _mth  – month-end
-        _qtr  – quarter-end
-    """
-    tf_map = {'W-FRI': 'wk', 'ME': 'mth', 'QE': 'qtr'}
-    out = []
+    # try to coerce a RangeIndex built from a 'Date' column (rare case)
+    if not isinstance(df_daily.index, pd.DatetimeIndex):
+        if "Date" in df_daily.columns:
+            df_daily = (
+                df_daily.set_index("Date", drop=True)
+                        .sort_index()
+            )
+        if not isinstance(df_daily.index, pd.DatetimeIndex):
+            # still not datetime → bail out; resample would fail
+            return pd.DataFrame()
+    # --------------------------------------------------------------------
+
+    tf_map = {"W-FRI": "wk", "ME": "mth", "QE": "qtr"}
+    out_frames = []
 
     for freq, tag in tf_map.items():
-        tf_df = compute_indicators(
-            df_daily.resample(freq).last(), timeframe=tag
-        ).add_suffix(f"_{tag}")
-        tf_df = tf_df.reindex(df_daily.index, method='ffill')
-        out.append(tf_df)
-
-    htf = pd.concat(out, axis=1)
-
-    if {'RSI_daily', 'RSI_wk'}.issubset(htf.columns.union(df_daily.columns)):
-        htf['RSI_ratio_dw'] = (
-            df_daily['RSI_daily'] / htf['RSI_wk']
+        tf_df = (
+            compute_indicators(df_daily.resample(freq).last(), timeframe=tag)
+            .add_suffix(f"_{tag}")
+            .reindex(df_daily.index, method="ffill")
         )
+        out_frames.append(tf_df)
 
-    if {'EMA50_daily', 'EMA50_wk'}.issubset(htf.columns.union(df_daily.columns)):
-        htf['EMA50_slope_diff'] = (
-            df_daily['EMA50_daily'] - htf['EMA50_wk']
-        )
+    htf = pd.concat(out_frames, axis=1)
+
+    # cross-time-frame helpers (only if both columns exist)
+    if {"RSI_daily", "RSI_wk"}.issubset(htf.columns.union(df_daily.columns)):
+        htf["RSI_ratio_dw"] = df_daily["RSI_daily"] / htf["RSI_wk"]
+
+    if {"EMA50_daily", "EMA50_wk"}.issubset(htf.columns.union(df_daily.columns)):
+        htf["EMA50_slope_diff"] = df_daily["EMA50_daily"] - htf["EMA50_wk"]
 
     return htf
+
 
 def triple_barrier_labels(close: pd.Series,
                           atr:   pd.Series,
