@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 Swing Trading Strategy Script with Feature Refinement and Backtesting
 
@@ -42,10 +42,16 @@ from ta.volatility import DonchianChannel  # optional, if needed
 
 from colorama import init, Fore, Style
 init(autoreset=True)
-from fredapi import Fred 
-import configparser
 
 PREDICTIONS_FILE = "weekly_signals.json"
+
+DEFAULT_INTERVALS_CONFIG = {
+    '5m':  {'period': '14d',  'interval': '5m'},
+    '30m': {'period': '60d',  'interval': '30m'},
+    '1h':  {'period': '120d', 'interval': '1h'},
+    '90m': {'period': '60d',  'interval': '90m'},
+    '1d':  {'period': '380d', 'interval': '1d'}
+}
 
 DATA_CACHE: dict[tuple, tuple] = {}      # key → (df_5m, df_30m, df_1h, df_90m, df_1d)
 
@@ -63,13 +69,160 @@ def get_or_fetch(ticker: str, start=None, end=None):
         DATA_CACHE[key] = fetch_data(ticker, start=start, end=end)
     return DATA_CACHE[key]
 
-def load_config():
-    config = configparser.ConfigParser()
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    config_path = os.path.join(script_dir, "config.ini")
-    config.read(config_path)
+def batch_fetch_data_for_tickers(
+    tickers: list[str],
+    requested_intervals: list[str] | None = None,
+    cache_dir: str = ".ohlcv_cache",
+    start_date_override_1d: str | None = None,
+    end_date_override_1d: str | None = None
+) -> dict:
+    """
+    Fetches data for multiple tickers and multiple intervals using batch yfinance calls.
+    Returns a dictionary: {ticker: {interval_name: df, ...}, ...}
+    Caches results per interval for the batch of tickers.
+    """
+    Path(cache_dir).mkdir(exist_ok=True)
+    all_data = {ticker: {} for ticker in tickers}
+    # Determine which intervals to fetch
+    intervals_to_fetch = DEFAULT_INTERVALS_CONFIG.keys()
+    if requested_intervals and len(requested_intervals) > 0:
+        intervals_to_fetch = [i for i in requested_intervals if i in DEFAULT_INTERVALS_CONFIG]
 
-    return config['FRED'].get('api_key', None)
+    if not intervals_to_fetch:
+        # This case should ideally not be reached if requested_intervals is validated or DEFAULT_INTERVALS_CONFIG is always non-empty
+        print("Warning: No valid intervals to fetch specified.")
+        return all_data
+
+    processed_tickers = set() # To handle cases where a ticker might not return data for an interval
+
+    for interval_name in intervals_to_fetch:
+        params = DEFAULT_INTERVALS_CONFIG[interval_name]
+        batch_cache_filename_parts = sorted(list(set(tickers))) # Ensure consistent naming
+
+        use_override_for_1d = interval_name == '1d' and start_date_override_1d and end_date_override_1d
+
+        if use_override_for_1d:
+            cache_file_name = Path(cache_dir) / f"{'_'.join(batch_cache_filename_parts)}_1d_{start_date_override_1d}_{end_date_override_1d}.pkl"
+        else:
+            cache_file_name = Path(cache_dir) / f"{'_'.join(batch_cache_filename_parts)}_{interval_name}_{params['period']}_{params['interval']}.pkl"
+
+        # Cache check
+        # Max age for cache can be dynamic based on interval, similar to _download_cached
+        # For simplicity, let's use a fixed max_age or adapt logic from _download_cached if necessary
+        # This example uses a simple existence check; add freshness check for robustness
+        if cache_file_name.exists():
+            try:
+                # This cache stores data for ALL tickers for THIS interval
+                interval_batch_data = joblib.load(cache_file_name)
+                # Distribute to individual tickers
+                for ticker in tickers:
+                    if ticker in interval_batch_data:
+                         all_data[ticker][interval_name] = interval_batch_data[ticker]
+                # If all tickers for this interval are loaded from cache, continue
+                if all(interval_name in all_data[t] for t in tickers):
+                    print(f"Loaded {interval_name} for {', '.join(tickers)} from cache.")
+                    continue
+            except Exception as e:
+                print(f"Error loading cache file {cache_file_name}: {e}. Refetching.")
+                cache_file_name.unlink(missing_ok=True)
+
+        print(f"Fetching {interval_name} for {', '.join(tickers)}...")
+        # Use threads=True for yfinance to handle multiple tickers efficiently
+        # For '1d' interval, if start/end are needed, this function signature might need adjustment
+        # or handle it specifically if params contain start/end.
+        # Current DEFAULT_INTERVALS_CONFIG uses 'period'.
+        try:
+            if use_override_for_1d:
+                bulk_data = safe_download(
+                    tickers,
+                    start=start_date_override_1d,
+                    end=end_date_override_1d,
+                    interval=params['interval'], # Should be '1d'
+                    auto_adjust=True,
+                    progress=False,
+                    threads=True
+                )
+            else:
+                bulk_data = safe_download(
+                    tickers,
+                    period=params['period'],
+                    interval=params['interval'],
+                    auto_adjust=True,
+                    progress=False,
+                    threads=True # yfinance handles threading for multiple tickers
+                )
+        except Exception as e:
+            print(f"Error downloading {interval_name} for {tickers}: {e}")
+            bulk_data = pd.DataFrame() # Ensure bulk_data is a DataFrame
+
+        if bulk_data.empty:
+            print(f"No data returned for {interval_name} for {', '.join(tickers)}.")
+            # Assign empty DFs to all tickers for this interval if no data
+            for ticker in tickers:
+                all_data[ticker][interval_name] = pd.DataFrame()
+            continue
+
+        # Post-process and cache
+        # This will store data for ALL tickers for THIS interval in one file
+        current_interval_data_to_cache = {}
+        for ticker in tickers:
+            try:
+                if not tickers: # Should not happen if loop is over tickers
+                    continue
+
+                if len(tickers) == 1 and ticker in bulk_data.columns: # Single ticker, direct access
+                    df = bulk_data.copy()
+                elif isinstance(bulk_data.columns, pd.MultiIndex): # Multi ticker
+                    # Filter columns for the current ticker
+                    ticker_df = bulk_data.xs(ticker, level=1, axis=1)
+                    # Dropping the first level of column index which is now 'ticker'
+                    # ticker_df.columns = ticker_df.columns.droplevel(0) # No, this is not needed, xs handles it.
+                    df = ticker_df.copy()
+                else: # Single ticker download might not have MultiIndex
+                     df = bulk_data.copy()
+
+
+                # Clean data - similar to _clean in fetch_data
+                if 'Adj Close' in df.columns and 'Close' not in df.columns:
+                    df.rename(columns={'Adj Close': 'Close'}, inplace=True)
+
+                # Ensure standard OHLCV columns exist, even if empty after selection
+                expected_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
+                for col in expected_cols:
+                    if col not in df.columns:
+                        df[col] = np.nan # Add missing expected columns as NaN
+
+                df.dropna(how='all', inplace=True)
+                if df.index.tz is not None:
+                    df.index = df.index.tz_localize(None)
+
+                all_data[ticker][interval_name] = df
+                current_interval_data_to_cache[ticker] = df
+                processed_tickers.add(ticker)
+
+            except KeyError: # Ticker might not be in results if yfinance returns no data for it
+                print(f"No data for {ticker} in {interval_name} results. Assigning empty DataFrame.")
+                all_data[ticker][interval_name] = pd.DataFrame()
+                current_interval_data_to_cache[ticker] = pd.DataFrame()
+            except Exception as e:
+                print(f"Error processing {ticker} for {interval_name}: {e}")
+                all_data[ticker][interval_name] = pd.DataFrame()
+                current_interval_data_to_cache[ticker] = pd.DataFrame()
+
+        # Cache the processed data for this interval batch
+        if current_interval_data_to_cache: # Only save if there's something to cache
+            try:
+                joblib.dump(current_interval_data_to_cache, cache_file_name)
+            except Exception as e:
+                print(f"Error saving cache file {cache_file_name}: {e}")
+
+    # Ensure all tickers have keys for the intervals that were attempted, even if some failed
+    for ticker in tickers:
+        for interval_name in intervals_to_fetch: # Use intervals_to_fetch here
+            if interval_name not in all_data[ticker]:
+                all_data[ticker][interval_name] = pd.DataFrame()
+
+    return all_data
 
 def load_predictions():
     """Return cached predictions; add default keys for older records."""
@@ -400,7 +553,6 @@ def prepare_features(
     df_1h:  pd.DataFrame,
     df_90m: pd.DataFrame,
     df_1d:  pd.DataFrame,
-    macro_df: pd.DataFrame,
     *,
     horizon: int = 10,
     drop_recent: bool = True
@@ -433,10 +585,6 @@ def prepare_features(
           .join(daily_1h,  rsuffix='_1h')
           .join(daily_90m, rsuffix='_90m')
     )
-
-    # ---------- join macro -------------------------------------------
-    if macro_df is not None and not macro_df.empty:
-        features_df = features_df.join(macro_df, on='Date')
 
     # ---------- label & post-process (unchanged) ---------------------
     features_df.dropna(subset=['Close'], inplace=True)
@@ -543,7 +691,7 @@ def tune_threshold_and_train(features_df):
     split_idx = int(len(features_df) * 0.8)
     X_train, X_test = X_full.iloc[:split_idx], X_full.iloc[split_idx:]
     y_train, y_test = y_full.iloc[:split_idx], y_full.iloc[split_idx:]
- 
+
     train_data = pd.concat([X_train, y_train], axis=1)
     class_0 = train_data[train_data['future_class'] == 0]
     class_1 = train_data[train_data['future_class'] == 1]
@@ -646,7 +794,7 @@ def tune_threshold_and_train(features_df):
     return final_model, best_thr
 
 
-def generate_signal_output(ticker, latest_row, model, thr, macro_latest):
+def generate_signal_output(ticker, latest_row, model, thr):
     """
     Return a colourised LONG / SHORT string or None (skip bar).
     If ATR is missing/zero we fall back to 5 % of price instead of aborting.
@@ -688,75 +836,16 @@ def generate_signal_output(ticker, latest_row, model, thr, macro_latest):
 
 def get_macro_data(start, end, fred_api_key=None):
     """
-    Fetch daily VIX / IRX / TIP data (Yahoo) plus optional FRED series.
-    • If the requested span is < 3 days it widens the window to 7 days so that
-      Yahoo always has at least one completed session to return.
-    • If Yahoo still yields an empty frame it falls back to a 1-month pull and
-      crops forward to `end`.
+    Placeholder for macro data fetching.
+    Returns an empty DataFrame with a DatetimeIndex or None.
+    For now, it returns pd.DataFrame().
     """
-    # --- widen a single-day (or tiny) span so yfinance returns rows --------
-    start_dt = pd.to_datetime(start)
-    end_dt   = pd.to_datetime(end)
-    if (end_dt - start_dt).days < 3:
-        start_dt = end_dt - datetime.timedelta(days=7)
-        start = start_dt.strftime('%Y-%m-%d')
-
-    macro_symbols = ['^VIX', '^IRX', 'TIP']
-
-    try:
-        macro_df = yf.download(
-            macro_symbols,
-            start=start, end=end,
-            interval='1d',
-            auto_adjust=True,
-            progress=False
-        )['Close']
-    except Exception:
-        macro_df = pd.DataFrame()
-
-    if macro_df.empty or macro_df.isna().all().all():
-        # 30-day fallback
-        macro_df = yf.download(
-            macro_symbols,
-            period='1mo',
-            interval='1d',
-            auto_adjust=True,
-            progress=False
-        )['Close']
-        macro_df = macro_df.loc[:end]  # crop forward
-
-    if isinstance(macro_df.columns, pd.MultiIndex):
-        macro_df.columns = macro_df.columns.droplevel(1)
-
-    macro_df = macro_df.rename(columns={
-        '^VIX': 'VIX',
-        '^IRX': 'IRX',
-        'TIP':  'TIP'
-    }).ffill()
-
-    # -------- optional FRED series ---------------------------------------
-    if fred_api_key:
-        fred = Fred(api_key=fred_api_key)
-        wide_start = '1970-01-01'
-        wide_end   = datetime.datetime.today().strftime('%Y-%m-%d')
-
-        unrate = fred.get_series('UNRATE',  observation_start=wide_start,
-                                 observation_end=wide_end).resample('D').ffill()
-        unrate.name = 'UNRATE'
-
-        spread = fred.get_series('T10Y2Y', observation_start=wide_start,
-                                 observation_end=wide_end).resample('D').ffill()
-        spread.name = 'YIELD_SPREAD'
-
-        macro_df = macro_df.join(unrate,  how='outer')
-        macro_df = macro_df.join(spread,  how='outer')
-
-    macro_df = macro_df.asfreq('D').ffill()      # daily rows, forward-filled
-    macro_df = macro_df.loc[start:end]           # final crop
-    return macro_df
+    # Ensure pandas is imported. It's imported as `joblib, pandas as pd`
+    # so direct use of pd is fine.
+    return pd.DataFrame()
 
 
-def backtest_strategy(ticker, start_date, end_date, macro_df, log_file=None):
+def backtest_strategy(ticker, start_date, end_date, macro_df: pd.DataFrame | None = None, log_file=None):
     """
     Daily-lumped back-test with Sharpe, max-DD, time-in-market and ATR guard.
     """
@@ -764,7 +853,7 @@ def backtest_strategy(ticker, start_date, end_date, macro_df, log_file=None):
     df_5m, df_30m, df_1h, df_90m, df_1d = fetch_data(
         ticker, start=start_date, end=end_date
     )
-    feat = prepare_features(df_5m, df_30m, df_1h, df_90m, df_1d, macro_df)
+    feat = prepare_features(df_5m, df_30m, df_1h, df_90m, df_1d)
     feat = refine_features(feat)
     model, _ = tune_threshold_and_train(feat)
     if model is None:
@@ -864,8 +953,7 @@ def backtest_strategy(ticker, start_date, end_date, macro_df, log_file=None):
     # (CSV logging stays the same as your original implementation)
 
 def prepare_features_intraday(
-    df_30m: pd.DataFrame,
-    macro_df: pd.DataFrame | None = None
+    df_30m: pd.DataFrame
 ) -> pd.DataFrame:
     """
     30-minute feature set with its own Anchored VWAP_30m plus daily context.
@@ -914,22 +1002,16 @@ def prepare_features_intraday(
     df_30m['future_class'] = lbl
     df_30m = df_30m.iloc[:-horizon_bars]
 
-    # ---------- merge macro ------------------------------------------
-    if macro_df is not None and not macro_df.empty:
-        if macro_df.index.tz is not None:
-            macro_df = macro_df.tz_localize(None)
-        df_30m = df_30m.join(macro_df.reindex(df_30m.index, method='ffill'))
-
     return df_30m
 
-def backtest_strategy_intraday(ticker, start_date, end_date, macro_df,
+def backtest_strategy_intraday(ticker, start_date, end_date, macro_df: pd.DataFrame | None = None,
                                log_file=None):
     """
     30-minute intraday back-test with Sharpe, max-DD, time-in-market and ATR guard.
     """
     _, df_30m, _, _, _ = fetch_data(ticker, start=start_date, end=end_date)
 
-    feat = prepare_features_intraday(df_30m, macro_df)
+    feat = prepare_features_intraday(df_30m)
     feat = refine_features(feat)
     model, _ = tune_threshold_and_train(feat)
     if model is None:
@@ -1038,45 +1120,37 @@ def run_signals_on_watchlist(use_intraday=True):
     Fetches watchlist tickers and generates "live" signals for each ticker,
     using either intraday (30m) or daily-lumped features.
     """
-    fred_api_key = load_config()
     tickers = load_watchlist()
     if not tickers:
         print("Your watchlist is empty. Add tickers first.")
         return
 
-    today = datetime.datetime.today()
-    macro_start = today - datetime.timedelta(days=380)
-    macro_df = get_macro_data(
-        macro_start.strftime('%Y-%m-%d'),
-        today.strftime('%Y-%m-%d'),
-        fred_api_key=fred_api_key
-    )
+    intervals_needed = None
+    if use_intraday:
+        intervals_needed = ['30m'] # Only fetch 30m for intraday mode
 
-    # Ensure macro_df is timezone-naive
-    if macro_df.index.tz is not None:
-        macro_df.index = macro_df.index.tz_localize(None)  # <-- ADDED
+    # Batch fetch data for all tickers
+    all_ticker_data = batch_fetch_data_for_tickers(
+        tickers,
+        requested_intervals=intervals_needed
+        # No date overrides needed here as we use DEFAULT_INTERVALS_CONFIG periods
+    )
 
     for ticker in tickers:
         print(f"\n=== Processing {ticker} (live) ===")
-        df_5m, df_30m, df_1h, df_90m, df_1d = get_or_fetch(ticker)
+        ticker_data = all_ticker_data.get(ticker, {})
 
-        # Strip timezones from all fetched frames
-        if df_5m.index.tz is not None:
-            df_5m.index = df_5m.index.tz_localize(None)     # <-- ADDED
-        if df_30m.index.tz is not None:
-            df_30m.index = df_30m.index.tz_localize(None)   # <-- ADDED
-        if df_1h.index.tz is not None:
-            df_1h.index = df_1h.index.tz_localize(None)
-        if df_90m.index.tz is not None:
-            df_90m.index = df_90m.index.tz_localize(None)
-        if df_1d.index.tz is not None:
-            df_1d.index = df_1d.index.tz_localize(None)
-
-        # Prepare features in either intraday or daily-lumped mode
         if use_intraday:
-            features_df = prepare_features_intraday(df_30m, macro_df)
+            df_30m = ticker_data.get('30m', pd.DataFrame())
+            # Other df_ an be omitted or set to empty if prepare_features_intraday doesn't need them
+            features_df = prepare_features_intraday(df_30m)
         else:
-            features_df = prepare_features(df_5m, df_30m, df_1h, df_90m, df_1d, macro_df)
+            df_5m  = ticker_data.get('5m', pd.DataFrame())
+            df_30m = ticker_data.get('30m', pd.DataFrame())
+            df_1h  = ticker_data.get('1h', pd.DataFrame())
+            df_90m = ticker_data.get('90m', pd.DataFrame())
+            df_1d  = ticker_data.get('1d', pd.DataFrame())
+            features_df = prepare_features(df_5m, df_30m, df_1h, df_90m, df_1d)
 
         features_df = refine_features(features_df)
         if features_df.empty or 'future_class' not in features_df.columns:
@@ -1090,13 +1164,8 @@ def run_signals_on_watchlist(use_intraday=True):
 
         # Generate final signal
         latest_row = features_df.drop(columns='future_class').iloc[-1]
-        latest_date = features_df.index[-1]
-        if latest_date in macro_df.index:
-            macro_row = macro_df.loc[latest_date].to_dict()
-        else:
-            macro_row = macro_df.iloc[-1].to_dict()
 
-        print(generate_signal_output(ticker, latest_row, model, best_thr, macro_row))
+        print(generate_signal_output(ticker, latest_row, model, best_thr))
 
 def backtest_watchlist():
     """Runs your existing backtest logic on each watchlist ticker."""
@@ -1104,17 +1173,16 @@ def backtest_watchlist():
     if not tickers:
         print("Your watchlist is empty. Add tickers first.")
         return
-    
+
     start_arg = input("Enter backtest start date (YYYY-MM-DD): ").strip()
     end_arg   = input("Enter backtest end date (YYYY-MM-DD): ").strip()
     if not start_arg or not end_arg:
         print("Invalid date range.")
         return
 
-    macro_df = get_macro_data(start_arg, end_arg)
     for ticker in tickers:
         print(f"\n=== Backtesting {ticker} from {start_arg} to {end_arg} ===")
-        backtest_strategy(ticker, start_arg, end_arg, macro_df)
+        backtest_strategy(ticker, start_arg, end_arg, macro_df=pd.DataFrame())
         # Or if you want to log to a file, pass `log_file=...`
 
 def show_signals_for_current_week() -> None:
@@ -1124,7 +1192,6 @@ def show_signals_for_current_week() -> None:
     signals close the old position and open a new one.  Skips rows where ATR
     is missing/zero.
     """
-    fred_api_key = load_config()
     tickers = load_watchlist()
     if not tickers:
         print("Your watchlist is empty. Add tickers first.")
@@ -1137,24 +1204,30 @@ def show_signals_for_current_week() -> None:
     train_start = monday - datetime.timedelta(days=lookback)
     start_s, end_s = train_start.strftime('%Y-%m-%d'), today.strftime('%Y-%m-%d')
 
-    macro_df = get_macro_data(start_s, end_s, fred_api_key=fred_api_key)
-    if macro_df.index.tz:
-        macro_df.index = macro_df.index.tz_localize(None)
+    # Batch fetch data for all tickers, using start_s and end_s for the '1d' interval
+    all_ticker_data = batch_fetch_data_for_tickers(
+        tickers,
+        requested_intervals=None, # Fetch all default intervals
+        start_date_override_1d=start_s,
+        end_date_override_1d=end_s
+    )
 
     cache            = load_predictions()
     open_by_symbol   = {p['symbol']: p for p in cache if p['status'] == 'Open'}
 
     for ticker in tickers:
         print(f"\n=== {ticker}: Signals {monday:%Y-%m-%d} → {today:%Y-%m-%d} ===")
-        try:
-            df_5m, df_30m, df_1h, df_90m, df_1d = fetch_data(
-                ticker, start=start_s, end=end_s)
-        except Exception as e:
-            print(f"Error fetching {ticker}: {e}")
-            continue
+        ticker_data = all_ticker_data.get(ticker, {})
+        df_5m  = ticker_data.get('5m', pd.DataFrame())
+        df_30m = ticker_data.get('30m', pd.DataFrame())
+        df_1h  = ticker_data.get('1h', pd.DataFrame())
+        df_90m = ticker_data.get('90m', pd.DataFrame())
+        df_1d  = ticker_data.get('1d', pd.DataFrame())
 
-        feats_all = prepare_features(df_5m, df_30m, df_1h, df_90m, df_1d,
-                                     macro_df, drop_recent=False)
+        # Error handling for missing data can be done here if necessary,
+        # e.g. if df_1d is empty, continue
+
+        feats_all = prepare_features(df_5m, df_30m, df_1h, df_90m, df_1d, drop_recent=False)
         if feats_all.empty:
             print("No data.")
             continue
@@ -1175,7 +1248,7 @@ def show_signals_for_current_week() -> None:
         open_dir = open_by_symbol.get(ticker, {}).get('direction')
 
         for dt, row in week_feat.iterrows():
-            sig = generate_signal_output(ticker, row, model, thr, {})
+            sig = generate_signal_output(ticker, row, model, thr)
             if sig is None:
                 continue
 
@@ -1443,7 +1516,6 @@ def main():
         interactive_menu()
         return
 
-    fred_api_key = load_config()
     tickers = args.tickers
     log_trades = args.log
     run_backtest = args.backtest
@@ -1460,15 +1532,13 @@ def main():
     # 1) If in BACKTEST mode, we handle either intraday or daily-lumped
     # ---------------------------------------------------------------------
     if run_backtest and start_arg and end_arg:
-        macro_df = get_macro_data(start_arg, end_arg, fred_api_key=fred_api_key)
-
         # (a) Intraday approach if -real is set
         if use_intraday:
             for ticker in tickers:
                 log_filename = f"{ticker}_30m_{start_arg}_{end_arg}.csv"
                 with open(log_filename, "a") as lf:
                     print(f"\n=== Intraday Backtesting {ticker} (30m) from {start_arg} to {end_arg} ===")
-                    backtest_strategy_intraday(ticker, start_arg, end_arg, macro_df, log_file=lf)
+                    backtest_strategy_intraday(ticker, start_arg, end_arg, macro_df=pd.DataFrame(), log_file=lf)
 
         # (b) Otherwise daily-lumped approach
         else:
@@ -1476,7 +1546,7 @@ def main():
                 log_filename = f"{ticker}_{start_arg}_{end_arg}.csv"
                 with open(log_filename, "a") as lf:
                     print(f"\n=== Backtesting {ticker} from {start_arg} to {end_arg} ===")
-                    backtest_strategy(ticker, start_arg, end_arg, macro_df, log_file=lf)
+                    backtest_strategy(ticker, start_arg, end_arg, macro_df=pd.DataFrame(), log_file=lf)
 
         # Once backtest is done, we can safely close the main log file (if any) and return
         if log_file:
@@ -1487,27 +1557,26 @@ def main():
     # 2) Otherwise do the "LIVE" signal generation mode
     # ---------------------------------------------------------------------
     # (No start/end provided or no --backtest)
-    today = datetime.datetime.today()
-    macro_start = today - datetime.timedelta(days=380)
-    macro_df = get_macro_data(
-        macro_start.strftime('%Y-%m-%d'),
-        today.strftime('%Y-%m-%d'),
-        fred_api_key=fred_api_key
+    # Batch fetch data for all tickers in live mode
+    all_ticker_data = batch_fetch_data_for_tickers(
+        tickers,
+        requested_intervals=None # Fetch all default intervals
     )
 
     for ticker in tickers:
         print(f"\n=== Processing {ticker} (live signal mode) ===")
-        try:
-           df_5m, df_30m, df_1h, df_90m, df_1d = get_or_fetch(ticker)
-        except Exception as e:
-            print(f"Error fetching data for {ticker}: {e}")
-            continue
+        ticker_data = all_ticker_data.get(ticker, {})
+        df_5m  = ticker_data.get('5m', pd.DataFrame())
+        df_30m = ticker_data.get('30m', pd.DataFrame())
+        df_1h  = ticker_data.get('1h', pd.DataFrame())
+        df_90m = ticker_data.get('90m', pd.DataFrame())
+        df_1d  = ticker_data.get('1d', pd.DataFrame())
 
-        if df_1d.empty or 'Close' not in df_1d.columns:
+        if df_1d.empty or 'Close' not in df_1d.columns: # Still check df_1d as it's crucial
             print(f"No usable daily data for {ticker}, skipping.")
             continue
 
-        features_df = prepare_features(df_5m, df_30m, df_1h, df_90m, df_1d, macro_df)
+        features_df = prepare_features(df_5m, df_30m, df_1h, df_90m, df_1d)
         if features_df.empty:
             print(f"Insufficient data for {ticker}, skipping.")
             continue
@@ -1528,14 +1597,7 @@ def main():
         X_latest.bfill(inplace=True)
         latest_series = X_latest.iloc[0]
 
-        # Use last date from features or fallback to macro
-        latest_date = features_df.index[-1]
-        if latest_date in macro_df.index:
-            macro_latest = macro_df.loc[latest_date].to_dict()
-        else:
-            macro_latest = macro_df.iloc[-1].to_dict()
-
-        signal_output = generate_signal_output(ticker, latest_series, model, best_thr, macro_latest)
+        signal_output = generate_signal_output(ticker, latest_series, model, best_thr)
         print(signal_output)
 
         # Optionally log this single signal
