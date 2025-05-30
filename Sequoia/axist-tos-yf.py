@@ -11,9 +11,6 @@ import numpy as np
 import yfinance as yf
 import urwid
 from pathlib import Path
-from alpaca.data import StockHistoricalDataClient
-from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
-from alpaca.common.exceptions import APIError
 from watchlist_utils import load_watchlist, save_watchlist, manage_watchlist
 from ta.momentum import RSIIndicator, StochasticOscillator
 from ta.trend import CCIIndicator
@@ -40,11 +37,11 @@ warnings.filterwarnings(
 )
 
 _tf_map = {
-    "5m":  TimeFrame(5,  TimeFrameUnit.Minute),
-    "30m": TimeFrame(30, TimeFrameUnit.Minute),
-    "1h":  TimeFrame(1,  TimeFrameUnit.Hour),
-    "90m": TimeFrame(90, TimeFrameUnit.Minute),
-    "1d":  TimeFrame(1,  TimeFrameUnit.Day),
+    "5m":  "5m",
+    "30m": "30m",
+    "1h":  "1h",
+    "90m": "90m", # yfinance supports 90m
+    "1d":  "1d",
 }
 
 PREDICTIONS_FILE = "weekly_signals.json"
@@ -69,43 +66,71 @@ def load_config(section: str | None = None) -> dict | str | None:
     # return all options in that section as a plain dict
     return {k: v for k, v in cfg.items(section)}
 
-# ── Alpaca client (global singleton) ─────────────────────────────────
-_ALP_KEYS   = load_config("ALPACA")           # may be {} if section absent
-_ALP_CLIENT = _init_alpaca_client(_ALP_KEYS)
-# ─────────────────────────────────────────────────────────────────────
+# Alpaca client related lines removed.
 
-def alpaca_download(symbol: str, *,
-                    start: str | None = None,
-                    end:   str | None = None,
-                    timeframe: str = "1d",
-                    limit: int | None = None) -> pd.DataFrame:
-    """Return a tz‑naïve OHLCV DataFrame from Alpaca."""
-    tf        = _tf_map[timeframe]
-    start_dt  = pd.to_datetime(start) if start else None
-    end_dt    = pd.to_datetime(end)   if end   else None
-
+def yf_download_wrapper(tickers, period=None, interval="1d", start=None, end=None, progress=False) -> pd.DataFrame:
+    """
+    A wrapper for yf.download that handles common tasks like:
+    - Ensuring Open, High, Low, Close, Volume columns.
+    - Making the index timezone-naive.
+    - Handling empty responses.
+    """
+    global YF_CALLS
+    YF_CALLS += 1
     try:
-        bars = _ALP_CLIENT.get_stock_bars(
-            symbol,
-            tf,
-            start_dt,
-            end_dt,
-            limit=limit,
-            adjustment="raw",
-            feed=_ALP_KEYS.get("data_feed", "iex"),
-        ).df
-    except APIError as e:
-        raise RuntimeError(f"Alpaca download error: {e}")
+        df = yf.download(
+            tickers=tickers,
+            period=period,
+            interval=interval,
+            start=start,
+            end=end,
+            progress=progress,
+            auto_adjust=False, # Keep True if you prefer adjusted prices directly
+            threads=True # Use threads for multiple tickers
+        )
+        if df.empty:
+            # For single ticker, yf.download returns empty df with no columns
+            # For multiple tickers, it might have structure but all NaNs
+            # We ensure a consistent empty DataFrame format
+            if isinstance(tickers, str) or (isinstance(tickers, list) and len(tickers) == 1):
+                 return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
+            # For multiple tickers, yfinance might return a multi-index frame
+            # If all data is NaN (e.g. bad tickers), it could be empty in content
+            # It's safer to let it return its structure and let caller handle it if multi-indexed
+            # or check if all values are NaN. For now, if df.empty is true, assume this check is sufficient.
 
-    if bars.empty:
-        return bars
+        # Ensure standard column names (yfinance usually provides them like this)
+        # If auto_adjust=False, columns are 'Open', 'High', 'Low', 'Close', 'Volume', 'Adj Close'
+        # If auto_adjust=True, columns are 'Open', 'High', 'Low', 'Close', 'Volume'
+        # We will select specific columns to ensure consistency
+        if not df.empty:
+            if isinstance(df.columns, pd.MultiIndex):
+                # For multi-ticker download, columns are like [('Open', 'AAPL'), ('Close', 'AAPL'), ...]
+                # We want to ensure the top level has the OHLCV names
+                # This is generally fine, but we'll ensure the final df passed around
+                # in single-ticker functions has simple column names.
+                # safe_download will return this multi-index if multiple tickers are requested.
+                # Other functions like _download_cached typically deal with single tickers.
+                pass # Let it be multi-indexed for now.
+            else: # Single ticker
+                df = df[["Open", "High", "Low", "Close", "Volume"]]
 
-    if isinstance(bars.index, pd.MultiIndex):
-        bars = bars.droplevel(0)
-    bars.rename(columns={"open":"Open","high":"High","low":"Low",
-                         "close":"Close","volume":"Volume"}, inplace=True)
-    bars.index = bars.index.tz_localize(None)
-    return bars[["Open","High","Low","Close","Volume"]]
+
+            # Make index timezone-naive
+            if df.index.tz is not None:
+                df.index = df.index.tz_localize(None)
+
+        return df
+
+    except Exception as e:
+        print(f"yfinance download error for {tickers} ({interval}, {period}, {start}-{end}): {e}")
+        # Return an empty DataFrame with standard columns in case of error
+        if isinstance(tickers, str) or (isinstance(tickers, list) and len(tickers) == 1):
+            return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
+        else: # For multiple tickers, an empty multi-index df might be more complex to create here
+              # For now, return simple empty df, or consider raising to let caller handle
+            return pd.DataFrame()
+
 
 def get_or_fetch(ticker: str, start=None, end=None):
     """
@@ -143,123 +168,101 @@ def save_predictions(pred_list):
     with open(PREDICTIONS_FILE, "w") as fh:
         json.dump(pred_list, fh, indent=2)
 
-def alpaca_download(symbol: str,
-                    *,
-                    start: str | None = None,
-                    end: str | None = None,
-                    timeframe: str = "1d",
-                    limit: int | None = None) -> pd.DataFrame:
+def _get_latest_price_yf(symbol: str) -> float | None:
     """
-    Pull OHLCV bars from Alpaca and return a tz-naïve DataFrame that matches
-    the script’s original Yahoo shape.
+    Fetches the latest available closing price for a symbol using yfinance.
+    Tries 1-minute data for the current day first, then falls back to the last daily close.
     """
-    tf = _tf_map[timeframe]
-    # Alpaca needs *datetime* objects
-    start_dt = pd.to_datetime(start) if start else None
-    end_dt   = pd.to_datetime(end)   if end   else None
-
     try:
-        bars = _ALP_CLIENT.get_stock_bars(
-            symbol_or_symbols=symbol,
-            timeframe=tf,
-            start=start_dt,
-            end=end_dt,
-            limit=limit,
-            adjustment="raw",                 # leave prices untouched
-            feed=_ALP_KEYS.get("data_feed", "iex"),
-        ).df
-    except APIError as e:
-        raise RuntimeError(f"Alpaca download error: {e}")
-
-    if bars.empty:
-        return bars
-
-    # Alpaca returns a multi-index (symbol, timestamp) even for one symbol
-    if isinstance(bars.index, pd.MultiIndex):
-        bars = bars.droplevel(0)
-
-    # Standardise column names
-    bars.rename(columns={
-        "open": "Open", "high": "High", "low": "Low",
-        "close": "Close", "volume": "Volume",
-    }, inplace=True)
-
-    bars.index = bars.index.tz_localize(None)
-    return bars[["Open", "High", "Low", "Close", "Volume"]]
+        # Try to get the latest 1-minute data for today
+        # Fetches data for the last day, with 1m interval
+        data = yf.download(tickers=symbol, period="1d", interval="1m", progress=False, auto_adjust=False)
+        if not data.empty and 'Close' in data.columns:
+            return float(data['Close'].iloc[-1])
+        else:
+            # Fallback: try to get the last daily close from the last 2 days
+            data_daily = yf.download(tickers=symbol, period="2d", interval="1d", progress=False, auto_adjust=False)
+            if not data_daily.empty and 'Close' in data_daily.columns:
+                return float(data_daily['Close'].iloc[-1])
+        return None
+    except Exception as e:
+        print(f"Error fetching latest price for {symbol} with yfinance: {e}", file=sys.stderr)
+        return None
 
 def _update_positions_status() -> None:
     """
-    Refresh open-trade status using the *latest* bar from Alpaca instead
-    of a single-day Yahoo download.
+    Refresh open-trade status using the latest price from yfinance.
     """
     preds = load_predictions()
     open_pos = [p for p in preds if p.get("status") == "Open"]
     if not open_pos:
         return
 
-    symbols = sorted({p["symbol"] for p in open_pos})
-
-    # -------- get last close for each symbol -------------------------
-    price_map = {}
-    for sym in symbols:
-        try:
-            bar = _ALP_CLIENT.get_stock_latest_bar(
-                sym, feed=_ALP_KEYS.get("data_feed", "iex")
-            ).close
-            price_map[sym] = float(bar)
-        except APIError:
-            # fall back to entry price if API hiccups
-            price_map[sym] = next(p["entry_price"]
-                                  for p in open_pos if p["symbol"] == sym)
-
-    today = datetime.date.today().isoformat()
     changed = False
+    today_iso = datetime.date.today().isoformat()
 
     for rec in open_pos:
         sym = rec["symbol"]
-        now_price = price_map[sym]
+        latest_price = _get_latest_price_yf(sym)
+
+        if latest_price is None:
+            print(f"Could not fetch latest price for {sym} in _update_positions_status. Skipping update for this position.", file=sys.stderr)
+            continue # Use last known price or skip? Original used entry_price as fallback in Alpaca version. Here we skip if no price.
+
+        now_price = latest_price # If we fetched successfully
+
+        hit_stop = False
+        hit_target = False
 
         if rec["direction"] == "LONG":
-            hit_stop   = now_price <= rec["stop_loss"]
-            hit_target = now_price >= rec["profit_target"]
-        else:
-            hit_stop   = now_price >= rec["stop_loss"]
-            hit_target = now_price <= rec["profit_target"]
+            if now_price <= rec["stop_loss"]:
+                hit_stop = True
+            elif now_price >= rec["profit_target"]:
+                hit_target = True
+        elif rec["direction"] == "SHORT": # Assuming "SHORT"
+            if now_price >= rec["stop_loss"]:
+                hit_stop = True
+            elif now_price <= rec["profit_target"]:
+                hit_target = True
 
         if hit_stop or hit_target:
             rec["status"]     = "Stop" if hit_stop else "Target"
-            rec["exit_date"]  = today
+            rec["exit_date"]  = today_iso
             rec["exit_price"] = round(now_price, 2)
             changed = True
+            print(f"Position updated: {sym} hit {rec['status']} at {now_price}")
 
     if changed:
         save_predictions(preds)
-
 
 def safe_download(tickers, *_, period=None, interval="1d",
                   start=None, end=None, **__):
     """
     Thin wrapper so existing calls (period/interval OR start/end) still work.
-    Works one symbol at a time – Alpaca has no bulk endpoint for mixed bars.
+    Uses yf_download_wrapper for data fetching.
     """
-    if isinstance(tickers, (list, tuple, set)):
-        frames = {}
-        for sym in tickers:
-            frames[sym] = alpaca_download(
-                sym,
-                timeframe=interval,
-                start=start,
-                end=end,
-            )
-        return pd.concat(frames, axis=1)
+    # yfinance's yf.download can handle single strings or lists of strings for tickers.
+    # It also manages period/interval and start/end logic internally.
+    
+    # Determine if 'interval' from _tf_map needs to be used or if it's already a yf string
+    tf = _tf_map.get(interval, interval) # Use mapped value if available, else assume interval is yf compatible
 
-    # single symbol
-    return alpaca_download(
-        tickers,
-        timeframe=interval,
+    data = yf_download_wrapper(
+        tickers=tickers,
+        period=period,
+        interval=tf,
         start=start,
         end=end,
+        progress=False # Usually set to False for automated scripts
     )
+    
+    # yf.download returns a DataFrame.
+    # If multiple tickers are given, it's a multi-index DataFrame.
+    # This is handled by preload_interval_cache, so no change needed here for that.
+    # For single ticker, it's a simple DataFrame.
+    # yf_download_wrapper already handles timezone localization and column selection.
+    return data
+
 
 def _download_cached(ticker: str,
                      period: str,
@@ -267,7 +270,7 @@ def _download_cached(ticker: str,
                      cache_dir: str = ".ohlcv_cache") -> pd.DataFrame:
     """
     Exactly the same disk-cache logic as before, but the network fetch
-    now goes through Alpaca instead of Yahoo.
+    now goes through yfinance instead of Alpaca.
     """
     Path(cache_dir).mkdir(exist_ok=True)
     fname = Path(cache_dir) / f"{ticker}_{period}_{interval}.pkl"
@@ -286,10 +289,20 @@ def _download_cached(ticker: str,
         except Exception:
             fname.unlink(missing_ok=True)
 
-    fresh = alpaca_download(
-        ticker,
-        timeframe=interval,
-        limit=None,           # let “period” control the length
+    
+    tf_interval = _tf_map.get(interval, interval) # Get yfinance compatible interval string
+
+    # yfinance typically uses 'period' OR 'start'/'end'.
+    # The original alpaca_download had a 'limit' parameter.
+    # yf.download doesn't have a direct 'limit' for number of bars with 'period'.
+    # If 'period' is given (e.g., "60d"), yf.download fetches data for that duration.
+    # If 'limit' was essential, one might fetch more data and then df.tail(limit).
+    # However, looking at fetch_data, limit=None is passed when period is used.
+    fresh = yf_download_wrapper(
+        tickers=ticker, # _download_cached is for single ticker
+        period=period,  # yfinance uses period e.g. "60d"
+        interval=tf_interval, # yfinance uses interval e.g. "30m"
+        # start and end are not typically used with period in yf.download
     )
 
     if fname.exists():
@@ -310,9 +323,9 @@ def preload_interval_cache(symbols: list[str],
     if not symbols:
         return
 
-    # one bulk call – threads=False keeps it to ONE HTTPS request
-    bulk = safe_download(symbols, period=period, interval=interval,
-                         auto_adjust=True, progress=False, threads=False)
+    # one bulk call
+    # auto_adjust, progress, threads are handled by yf_download_wrapper or safe_download
+    bulk = safe_download(symbols, period=period, interval=interval)
     if bulk.empty:
         return
 
@@ -325,15 +338,16 @@ def preload_interval_cache(symbols: list[str],
         df = bulk[sym].dropna(how="all")
         if df.empty:
             continue
-        if df.index.tz is not None:
-            df.index = df.index.tz_localize(None)
+        # Timezone localization is now handled by yf_download_wrapper
+        # if df.index.tz is not None:
+        #     df.index = df.index.tz_localize(None)
         joblib.dump(df,
                     Path(cache_dir) / f"{sym}_{period}_{interval}.pkl")
 
 
 def fetch_data(ticker, start=None, end=None, intervals=None, warmup_days=300):
     """
-    Returns (df_5m, df_30m, df_1h, df_90m, df_1d) – now entirely from Alpaca.
+    Returns (df_5m, df_30m, df_1h, df_90m, df_1d) – now entirely from yfinance.
     """
     if intervals is None:
         intervals = {
@@ -354,23 +368,55 @@ def fetch_data(ticker, start=None, end=None, intervals=None, warmup_days=300):
     if start and end:
         real_start = (pd.to_datetime(start) -
                       datetime.timedelta(days=warmup_days)).strftime("%Y-%m-%d")
-        df_1d = alpaca_download(
-            ticker,
-            timeframe="1d",
+        df_1d = yf_download_wrapper(
+            tickers=ticker,
+            interval="1d", # Fetched as daily
             start=real_start,
-            end=end,
+            end=end
         )
     else:
-        df_1d = _download_cached(ticker, *intervals["1d"])
+        # Here intervals["1d"] is like ("380d", "1d")
+        # So period = "380d", interval = "1d"
+        period_val, interval_val = intervals["1d"]
+        df_1d = _download_cached(ticker, period_val, interval_val) # Use mapped interval if necessary
 
-    # clean helper (unchanged)
-    def _clean(df: pd.DataFrame) -> pd.DataFrame:
+    # clean helper (modified to handle potential MultiIndex columns for single tickers)
+    def _clean(df: pd.DataFrame, ticker_symbol: str) -> pd.DataFrame:
         df.dropna(how="all", inplace=True)
+        if df.empty:
+            return df
+
         if hasattr(df.index, "tz") and df.index.tz is not None:
             df.index = df.index.tz_localize(None)
+
+        if isinstance(df.columns, pd.MultiIndex):
+            if ticker_symbol in df.columns.get_level_values(1):
+                df = df.xs(ticker_symbol, axis=1, level=1)
+            # Add other multi-index handling logic if necessary, but keep it concise for now
+            # Fallback or warning if structure is not as expected:
+            elif not all(isinstance(col, str) for col in df.columns): # if not already flattened
+                 print(f"[WARN] In _clean for {ticker_symbol}, could not fully flatten MultiIndex columns: {df.columns.tolist()}", file=sys.stderr)
+
+
+        # Ensure 'Close' column from 'Adj Close' if necessary, and OHLCV presence
+        if not df.empty:
+            if 'Adj Close' in df.columns and 'Close' not in df.columns:
+                df = df.rename(columns={'Adj Close': 'Close'})
+            
+            # It's better if yf_download_wrapper strictly enforces OHLCV presence.
+            # This check is a fallback.
+            expected_cols = ["Open", "High", "Low", "Close", "Volume"]
+            missing_cols = [col for col in expected_cols if col not in df.columns]
+            if missing_cols:
+                 print(f"[WARN] In _clean for {ticker_symbol}, DataFrame is missing expected columns: {missing_cols}. Current columns: {df.columns.tolist()}", file=sys.stderr)
         return df
 
-    return tuple(map(_clean, (df_5m, df_30m, df_1h, df_90m, df_1d)))
+    # Pass ticker to _clean for each DataFrame
+    cleaned_dfs = []
+    for frame in (df_5m, df_30m, df_1h, df_90m, df_1d):
+        cleaned_dfs.append(_clean(frame, ticker)) # ticker is available in fetch_data's scope
+    
+    return tuple(cleaned_dfs)
 
 
 def compute_indicators(df: pd.DataFrame, timeframe: str = "daily") -> pd.DataFrame:
@@ -528,9 +574,9 @@ def prepare_features(
           .join(daily_1h,  rsuffix='_1h')
           .join(daily_90m, rsuffix='_90m')
     )
-
-
-    # ---------- label & post-process (unchanged) ---------------------
+    
+    # DEBUG prints removed here
+    # Explicit check removed as the KeyError was due to MultiIndex, now handled in _clean
     features_df.dropna(subset=['Close'], inplace=True)
     if features_df.empty:
         return features_df
@@ -594,7 +640,6 @@ def refine_features(features_df, importance_cutoff=0.0001, corr_threshold=0.9):
     y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
 
     if len(np.unique(y_train)) < 2:
-        #print("[DEBUG] refine_features: Not enough classes to train. Skipping.")
         return features_df
 
     model.fit(X_train, y_train)
@@ -679,13 +724,6 @@ def tune_threshold_and_train(features_df):
             continue
 
         model = XGBClassifier(
-#            objective='multi:softmax',
-#            num_class=3,
-#            use_label_encoder=False,
-#            eval_metric='mlogloss',
-#            verbosity=0,
-#            tree_method='hist',      # GPU
-#            device='cuda'   # GPU
             objective='multi:softprob',   # so we can use probabilities
             num_class=3,
             use_label_encoder=False,
@@ -895,10 +933,13 @@ def backtest_strategy(ticker, start_date, end_date, log_file=None):
 
 def prepare_features_intraday(
     df_30m: pd.DataFrame | None = None
-) -> pd.DataFrame:
+) -> pd.DataFrame: # Assuming it should always return a DataFrame
     """
     30-minute feature set with its own Anchored VWAP_30m plus daily context.
     """
+    if df_30m is None:
+        return pd.DataFrame()
+
     df_30m = df_30m.copy()
     df_30m = compute_indicators(df_30m, timeframe='intraday')
     df_30m['AnchoredVWAP_30m'] = compute_anchored_vwap(df_30m, lookback_bars=200)
@@ -942,7 +983,7 @@ def prepare_features_intraday(
 
     df_30m['future_class'] = lbl
     df_30m = df_30m.iloc[:-horizon_bars]
-
+    return df_30m # Added missing return statement
 
 
 def backtest_strategy_intraday(ticker, start_date, end_date,  log_file=None):
@@ -1185,7 +1226,7 @@ def show_signals_since_start_of_week() -> None:
     save_predictions(closed + list(open_by_symbol.values()))
 
 def signals_performance_cli():
-    """Dashboard of OPEN trades – price refresh via Alpaca only."""
+    """Dashboard of OPEN trades – price refresh via yfinance."""
 
     all_recs = load_predictions()
     open_tr  = [p for p in all_recs if p['status'] == 'Open']
@@ -1207,17 +1248,18 @@ def signals_performance_cli():
                          footer=footer)
 
     def get_prices():
-        """Fetch one latest bar per open‑trade symbol via Alpaca."""
+        """Fetch the latest price for each open position's symbol using _get_latest_price_yf."""
         result = {}
-        for sym in {p['symbol'] for p in open_tr}:
-            try:
-                bar = _ALP_CLIENT.get_stock_latest_bar(
-                    sym, feed=_ALP_KEYS.get("data_feed", "iex")
-                )
-                result[sym] = float(bar.close)
-            except APIError:
-                result[sym] = next(p['entry_price']
-                                   for p in open_tr if p['symbol'] == sym)
+        symbols_in_open_trades = {p['symbol'] for p in open_tr} # Use open_tr defined in signals_performance_cli
+
+        for sym in symbols_in_open_trades:
+            latest_price = _get_latest_price_yf(sym)
+            if latest_price is not None:
+                result[sym] = latest_price
+            else:
+                # Fallback to entry price if live price fetch fails
+                result[sym] = next(p['entry_price'] for p in open_tr if p['symbol'] == sym)
+                print(f"Using entry price as fallback for {sym} in get_prices due to fetch error.", file=sys.stderr)
         return result
 
     def build_table(prices):
@@ -1340,8 +1382,9 @@ def closed_stats_cli():
     print(b("\nMost recent 10 closed trades:"))
     for rcd in recs[-10:]:
         pl_col = g if rcd['pnl_pct'] >= 0 else r
+        pnl_str = f"{rcd['pnl_pct']:+6.2f}%" # Use double quotes for dict key access
         print(f"{rcd['exit_date']}  {rcd['symbol']:5}  {rcd['direction']:5} "
-              f"{rcd['status']:6}  PnL {pl_col(f'{rcd['pnl_pct']:+6.2f}%')}")
+              f"{rcd['status']:6}  PnL {pl_col(pnl_str)}")
 
     # ── clear option ──
     if input(Fore.YELLOW + "\n(C)lear stats or Enter to return: " + Style.RESET_ALL).lower() == 'c':
@@ -1415,8 +1458,9 @@ def interactive_menu():
         elif choice == '4':
             backtest_watchlist()
 
-        elif choice == '5':                    
-            _update_positions_status()
+        elif choice == '5':
+            _update_positions_status() # Call the reimplemented function
+            print("Position statuses updated (if any hits).")
             signals_performance_cli()
 
         elif choice == '6':                     
