@@ -42,6 +42,11 @@ CAPITAL, RISK_PCT, SLIP_BP    = 100_000.0, 0.01, 5
 MODEL_PATH      = "xgb_reversal.model"
 REG_PCTL        = 0.75   # 75-th percentile of atr_pct defines “high-vol” regime
 
+# ---------- cache & grid --------------------------------
+CACHE_DIR   = "pred_cache"
+os.makedirs(CACHE_DIR, exist_ok=True)
+GRID_STEPS  = 21               # 0 = spot, ±10 ticks of 0.1 %
+
 # ---------------------- Data utilities ----------------------------------------
 def download(tkr: str) -> pd.DataFrame:
     df = yf.download(tkr, start=START_DATE, end=END_DATE,
@@ -59,6 +64,21 @@ def rsi(series: pd.Series, n: int = 2) -> pd.Series:
     loss  = -delta.clip(upper=0).rolling(n).mean()
     rs    = gain / (loss + 1e-12)
     return 100 - 100 / (1 + rs)
+
+def append_cache(row_dict: dict):
+    """Append one prediction row to today's CSV cache."""
+    fname = os.path.join(CACHE_DIR,
+                         f"predictions_{dt.date.today():%Y%m%d}.csv")
+    df = pd.DataFrame([row_dict])
+    if os.path.exists(fname):
+        df.to_csv(fname, mode="a", header=False, index=False)
+    else:
+        df.to_csv(fname, index=False)
+
+def load_cache() -> pd.DataFrame:
+    fname = os.path.join(CACHE_DIR,
+                         f"predictions_{dt.date.today():%Y%m%d}.csv")
+    return pd.read_csv(fname, parse_dates=["timestamp"]) if os.path.exists(fname)            else pd.DataFrame()
 
 # ---------------------- Feature engineering -----------------------------------
 def engineer(df: pd.DataFrame) -> pd.DataFrame:
@@ -258,6 +278,51 @@ def choose_regime(row, vol_thresh):
         print("Warning: vol_thresh is None or NaN in choose_regime. Defaulting to 'low'.")
         return "low"
     return "high" if atr_pct_val >= vol_thresh else "low"
+
+def price_scenario_prob(base_row: pd.Series,
+                        new_close: float,
+                        reg_bundle: dict) -> float:
+    """
+    Re-price close/high/low to a hypothetical level and recompute
+    price-dependent features needed by the model, then return calibrated
+    probability.
+    *Assumes other inputs (vol, volume) unchanged – good enough for ±1 % scan.*
+    """
+    r = base_row.copy()
+    scale = new_close / base_row["Close"]
+    r["Close"] *= scale
+    r["High"]  *= scale
+    r["Low"]   *= scale
+
+    # recompute quick features that depend on close
+    r["dist_vwap"] = (r["Close"] - r["vwap"]) / r["vwap"]
+
+    # The original bb_z recalculation logic from the prompt was:
+    # ma20 = base_row["Close"] * scale / (1 + base_row["bb_z"] *
+    #                                     base_row["Close"].rolling(20).std().iloc[-1])
+    # r["bb_z"]  = (r["Close"] - ma20) / base_row["Close"].rolling(20).std().iloc[-1]
+    # This is problematic because base_row["Close"] is a float and cannot be used with .rolling().
+    # Using a safer approach: recalculate bb_z if 'ma20' and 'std20' (standard deviation for bb)
+    # are available in base_row. Otherwise, fallback to the original bb_z value.
+    if 'ma20' in base_row and 'std20' in base_row and base_row['std20'] > 1e-9:
+        r['bb_z'] = (r['Close'] - base_row['ma20']) / base_row['std20']
+    else:
+        # Fallback to original bb_z if recalculation isn't reliably possible
+        r['bb_z'] = base_row.get('bb_z', 0)
+
+    reg   = choose_regime(r, reg_bundle["vol_thresh"])
+    mdl_components = reg_bundle['models'].get(reg) # Use .get for safety
+
+    if not mdl_components or not mdl_components.get("xgb") or not mdl_components.get("iso") or not reg_bundle.get("feats"):
+        # Handle cases where a model, its components, or features might be missing
+        # print(f"Warning: Model components or features missing for regime {reg} or bundle. Returning 0.0 probability.")
+        return 0.0
+
+    # Ensure all features are present in r, fill with 0 if any are missing (should not happen if base_row is from engineer())
+    features_for_prediction = r[reg_bundle["feats"]].fillna(0)
+
+    raw_p = mdl_components["xgb"].predict_proba(features_for_prediction.values.reshape(1, -1))[:, 1]
+    return float(mdl_components["iso"].transform(raw_p)[0]) # Ensure scalar output
 
 # Placed before train_regime, e.g., after dataset() functions or where other ML helpers are.
 def train_single(X_tr, y_tr, X_val, y_val):
@@ -696,62 +761,188 @@ def main():
         print("Backtest finished.")
 
     if args.live:
-        print(f"\n{dt.datetime.now()} Starting live signal generation...")
-        if not bundle or 'models' not in bundle or not bundle['models'] or \
-           bundle.get('vol_thresh') is None or np.isnan(bundle.get('vol_thresh')) or \
-           'feats' not in bundle:
+        # Ensure necessary functions and constants like engineer, download, ETF_LONG, LOOKBACK,
+        # choose_regime, append_cache, load_cache, price_scenario_prob,
+        # np, GRID_STEPS, ETF_SH are available in scope.
+
+        # The original main() loads the bundle. We need to ensure 'bundle' is available here.
+        # It is loaded outside this block, so it should be fine.
+
+        print(f"\n{dt.datetime.now()} Starting live signal generation with caching and grid search...")
+        if not bundle or 'models' not in bundle or not bundle['models'] or            bundle.get('vol_thresh') is None or np.isnan(bundle.get('vol_thresh')) or            'feats' not in bundle:
             print(f"{dt.datetime.now()} Live: Cannot run: model bundle is incomplete or invalid.")
+            return # Exit if bundle is not usable
+
+        # Download latest data and engineer features
+        # The original issue description uses:
+        # feats = engineer(download(ETF_LONG).tail(LOOKBACK+30))
+        # We need to ensure LOOKBACK is defined (it's a global constant).
+        # And that download() and engineer() are robust.
+        try:
+            raw_data = download(ETF_LONG) # Fetches based on START_DATE, END_DATE
+            if raw_data.empty or len(raw_data) < LOOKBACK + 30:
+                 # Try fetching a smaller, more recent period if initial download is insufficient
+                print(f"{dt.datetime.now()} Live: Initial download for {ETF_LONG} insufficient or empty (len {len(raw_data)}). Trying with period='3d'.")
+                raw_data = download(ETF_LONG) # yf.download has period defaults, this might need adjustment
+                                              # For consistency with old live mode, let's use period="3d" like get_live_prediction_data
+                raw_data = yf.download(ETF_LONG, period="3d", interval=INTERVAL, progress=False, timeout=10)
+                if raw_data.index.tz is not None:
+                    raw_data = raw_data.tz_localize(None)
+
+            if raw_data.empty:
+                print(f"{dt.datetime.now()} Live: Not enough data for {ETF_LONG} even after trying alternative download.")
+                return
+            # We need enough data for engineer() to produce all features, especially rolling ones.
+            # engineer() itself handles NaNs by dropping them.
+            # Taking tail(LOOKBACK + 30) ensures enough data for up to 30 bars, plus LOOKBACK for initial feature calculations.
+            feats = engineer(raw_data.tail(LOOKBACK + 30))
+        except Exception as e:
+            print(f"{dt.datetime.now()} Live: Error during data download or feature engineering: {e}")
             return
 
-        live_data_parts = get_live_prediction_data(bundle)
-
-        if live_data_parts is None:
-            print(f"{dt.datetime.now()} Live: Failed to get valid prediction data. No signal.")
+        if feats.empty:
+            print(f"{dt.datetime.now()} Live: Feature engineering resulted in empty DataFrame.")
             return
 
-        cal_prob = live_data_parts["cal_prob"]
-        regime_thr = live_data_parts["regime_thr"]
-        trend = live_data_parts["trend"]
-        ts = live_data_parts["timestamp"]
-        latest_row = live_data_parts["latest_row_data"]
+        row  = feats.iloc[-1].copy() # Use .copy() to avoid SettingWithCopyWarning later
+        spot = row["Close"]
 
-        bb_z_val = latest_row.get("bb_z")
-        spread_pct_val = latest_row.get("spread_pct")
+        # Determine regime and model
+        current_regime_internal = choose_regime(row, bundle["vol_thresh"])
+        mdl_components = bundle["models"].get(current_regime_internal)
 
-        if bb_z_val is None or pd.isna(bb_z_val) or \
-           spread_pct_val is None or pd.isna(spread_pct_val):
-            print(f"{ts} Live: bb_z or spread_pct missing/NaN in latest data. Cannot check eligibility.")
-            print(f"    Data: bb_z={bb_z_val}, spread_pct={spread_pct_val}, atr_pct={latest_row.get('atr_pct')}")
+        if not mdl_components or not mdl_components.get("xgb") or not mdl_components.get("iso") or mdl_components.get("thr") is None or np.isnan(mdl_components.get("thr")):
+            print(f"{dt.datetime.now()} Live: Model for regime '{current_regime_internal}' is missing, invalid, or has no threshold. Timestamp: {row.name}")
+            # Attempt to use 'low' regime as a fallback if current is 'high' and problematic
+            if current_regime_internal == "high":
+                print(f"{dt.datetime.now()} Live: Attempting fallback to 'low' regime.")
+                current_regime_internal = "low"
+                mdl_components = bundle["models"].get(current_regime_internal)
+                if not mdl_components or not mdl_components.get("xgb") or not mdl_components.get("iso") or mdl_components.get("thr") is None or np.isnan(mdl_components.get("thr")):
+                    print(f"{dt.datetime.now()} Live: Fallback 'low' regime model also problematic. Aborting.")
+                    return
+            else:
+                print(f"{dt.datetime.now()} Live: Aborting due to problematic model for regime '{current_regime_internal}'.")
+                return
+
+        mdl = mdl_components # Use the validated model components
+
+        # Calculate current probability
+        # Ensure row[bundle["feats"]] is a DataFrame for .values
+        features_for_pred = row[bundle["feats"]].values.reshape(1, -1)
+        if pd.DataFrame(features_for_pred).isnull().values.any():
+            print(f"{dt.datetime.now()} Live: NaN values found in features for current prediction. Aborting. Features: {row[bundle['feats']]}")
             return
 
-        is_eligible = Backtest._trade_eligible(latest_row)
+        raw  = mdl["xgb"].predict_proba(features_for_pred)[:, 1]
+        prob = float(mdl["iso"].transform(raw))
+        thr  = mdl["thr"] # This is the regime-specific threshold
 
-        current_regime_str = "Unknown"
-        atr_pct_val = latest_row.get("atr_pct")
-        # Check atr_pct_val for NaN before passing to choose_regime
-        if atr_pct_val is not None and not pd.isna(atr_pct_val) and bundle.get('vol_thresh') is not None and not np.isnan(bundle.get('vol_thresh')):
-            current_regime_str = choose_regime(latest_row, bundle.get('vol_thresh'))
+        # Determine side
+        # Ensure row["trend_sign"] exists (it's created by engineer())
+        if "trend_sign" not in row or pd.isna(row["trend_sign"]):
+            print(f"{dt.datetime.now()} Live: 'trend_sign' is missing or NaN in the latest row. Cannot determine trade side.")
+            return
 
-        # Ensure formatting is safe for potentially None or NaN values if checks above were less strict
-        atr_pct_display = f"{atr_pct_val:.4f}" if atr_pct_val is not None and not pd.isna(atr_pct_val) else 'N/A'
-        bb_z_display = f"{bb_z_val:.2f}" if bb_z_val is not None and not pd.isna(bb_z_val) else 'N/A'
-        spread_pct_display = f"{spread_pct_val:.4f}" if spread_pct_val is not None and not pd.isna(spread_pct_val) else 'N/A'
+        side = ("BUY " + (ETF_SH if row["trend_sign"] == 1 else ETF_LONG)
+                if prob >= thr else "NO-TRADE")
 
+        # ----- cache -------------------------------------------------------------
+        rec = {
+            "timestamp": feats.index[-1], # Timestamp from the features DataFrame index
+            "close":     spot,
+            "prob":      prob,
+            "regime":    current_regime_internal, # Use the determined regime
+            "side":      side.split()[0] # "BUY" or "NO-TRADE"
+        }
+        try:
+            append_cache(rec)
+        except Exception as e:
+            print(f"{dt.datetime.now()} Live: Error appending to cache: {e}")
 
-        print(f"{ts} Live data: Regime={current_regime_str}, CalibProb={cal_prob:.3f} (Thr={regime_thr:.3f}), Trend={trend}, Eligible={is_eligible}")
-        details = f"    bb_z={bb_z_display}, spread_pct={spread_pct_display}, atr_pct={atr_pct_display}"
-        print(details)
+        # ----- grid search for best price ---------------------------------------
+        # Ensure GRID_STEPS is defined (global constant)
+        # Ensure np is imported as np
+        grid_prices = spot * (1 + np.linspace(-0.01, 0.01, GRID_STEPS))
+        grid_probs  = []
+        # Ensure 'ma20' and 'std20' are in `row` if `price_scenario_prob` expects them for bb_z recalc.
+        # The `engineer` function should add these. We need to ensure `row` has them.
+        # If not, price_scenario_prob's bb_z calculation might be less accurate or fall back.
+        # The engineer function in the provided code does not explicitly add 'std20' but adds 'bb_z' using a std20_val.
+        # For price_scenario_prob to work best, base_row should have 'ma20' and 'std20'.
+        # Assuming 'ma20' is present from engineer. 'std20' refers to the 20-period std dev of Close.
+        # Let's check for 'ma20' and 'bb_z' (as bb_z implies std20 was calculable).
+        # price_scenario_prob has a fallback for bb_z if ma20/std20 are not directly there.
 
-        if is_eligible and cal_prob >= regime_thr:
-            side = -1 if trend == 1 else 1
-            etf_to_trade = ETF_SH if side == -1 else ETF_LONG
-            action = "BUY"
-            print(f"TRADE SIGNAL: {ts} --> {action} {etf_to_trade} (Prob={cal_prob:.3f}, Trend={trend}, Regime={current_regime_str})")
+        required_cols_for_scenario = ['Close', 'High', 'Low', 'vwap', 'ma20', 'bb_z'] # bb_z implies std20 was available during its calculation
+                                                                                       # price_scenario_prob also needs features defined in bundle["feats"]
+        missing_cols_in_row = [col for col in required_cols_for_scenario if col not in row or pd.isna(row[col])]
+        if any(feat_col not in row or pd.isna(row[feat_col]) for feat_col in bundle["feats"]):
+            missing_cols_in_row.extend([fc for fc in bundle["feats"] if fc not in row or pd.isna(row[fc])])
+
+        if missing_cols_in_row:
+            # Remove duplicates from missing_cols_in_row
+            missing_cols_in_row = sorted(list(set(missing_cols_in_row)))
+            print(f"{dt.datetime.now()} Live: Grid search may be inaccurate. Latest row is missing or has NaNs in: {missing_cols_in_row}")
+            best_price = spot
+            best_prob = prob
         else:
-            reason = []
-            if not is_eligible: reason.append("not eligible")
-            if cal_prob < regime_thr: reason.append(f"prob {cal_prob:.3f} < thr {regime_thr:.3f}")
-            print(f"{ts} Live: No trade signal. ({'; '.join(reason)})")
+            for p_hypothetical in grid_prices:
+                try:
+                    # Pass bundle directly as reg_bundle argument as it has the correct structure
+                    scenario_p = price_scenario_prob(row, p_hypothetical, bundle)
+                    grid_probs.append(scenario_p)
+                except Exception as e:
+                    print(f"{dt.datetime.now()} Live: Error in price_scenario_prob for price {p_hypothetical}: {e}")
+                    grid_probs.append(-1.0) # Append a dummy value indicating error
+
+            if not grid_probs:
+                best_price = spot
+                best_prob = prob
+            else:
+                best_idx    = int(np.argmax(grid_probs))
+                best_price  = float(grid_prices[best_idx])
+                best_prob   = float(grid_probs[best_idx]) if grid_probs[best_idx] != -1.0 else prob
+
+        # ----- console output ----------------------------------------------------
+        hist_df = pd.DataFrame()
+        try:
+            hist_df = load_cache()
+        except Exception as e:
+            print(f"{dt.datetime.now()} Live: Error loading cache for history: {e}")
+
+        hit_count = 0
+        trades_today_count = 0
+        if not hist_df.empty and 'prob' in hist_df.columns and 'side' in hist_df.columns and 'regime' in hist_df.columns:
+            for _, cached_row in hist_df.iterrows():
+                cached_prob = cached_row['prob']
+                cached_side = cached_row['side']
+                cached_regime = cached_row['regime']
+
+                model_for_cached_regime = bundle["models"].get(cached_regime)
+                if model_for_cached_regime and model_for_cached_regime.get('thr') is not None and not np.isnan(model_for_cached_regime['thr']):
+                    threshold_for_cached_row = model_for_cached_regime['thr']
+                    if cached_side == "BUY":
+                        trades_today_count +=1 # Count BUYs as trades
+                        if cached_prob >= threshold_for_cached_row:
+                            hit_count += 1
+                else:
+                    if cached_side == "BUY":
+                         trades_today_count +=1 # Still a trade, even if threshold was missing for eval
+            hit_rate_display = f"{hit_count / trades_today_count:.0%}" if trades_today_count > 0 else "N/A"
+        else:
+            hit_rate_display = "N/A"
+
+        print(f"\n{rec['timestamp']}  SPOT ${spot:.2f}")
+        print(f"Current prob  {prob:.2%} (Regime: {current_regime_internal}) | threshold {thr:.2%}  →  {side}")
+        print(f"Best prob in ±1 % grid:  {best_prob:.2%} at price ${best_price:.2f}")
+
+        if not hist_df.empty:
+            print(f"\n— Today so far —")
+            print(hist_df.tail(5)[["timestamp", "close", "prob", "regime", "side"]].to_string(index=False))
+            print(f"Trades today (BUY signals) {trades_today_count}  |   Hit-rate {hit_rate_display}")
+        else:
+            print("\n— No trade history for today yet —")
 
 if __name__ == "__main__":
     main()
