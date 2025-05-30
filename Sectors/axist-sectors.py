@@ -152,8 +152,11 @@ def alpaca_download(symbol: str, *,
     )
 
     try:
+        _inc_api_calls()
         bars = _ALP_CLIENT.get_stock_bars(request_params).df
     except APIError as e:
+        if hasattr(e, 'response') and e.response and e.response.status_code == 429:
+            print(Fore.YELLOW + "Alpaca API rate limit (429) encountered in alpaca_download. Please wait before trying again." + Style.RESET_ALL)
         raise RuntimeError(f"Alpaca download error: {e}")
 
     if bars.empty:
@@ -378,11 +381,14 @@ def _update_positions_status() -> None:
     if unique_symbols:
         try:
             latest_bars_req = StockLatestBarRequest(symbol_or_symbols=unique_symbols)
+            _inc_api_calls()
             latest_bars_data = _ALP_CLIENT.get_stock_latest_bar(latest_bars_req)
             for sym, bar_data in latest_bars_data.items():
                 if bar_data: # Check if bar_data is not None
                     price_map[sym] = float(bar_data.close)
         except APIError as e:
+            if hasattr(e, 'response') and e.response and e.response.status_code == 429:
+                print(Fore.YELLOW + "Alpaca API rate limit (429) encountered in _update_positions_status. Please wait before trying again." + Style.RESET_ALL)
             print(f"APIError in _update_positions_status: {e}")
             for sym_needed in unique_symbols:
                 if sym_needed not in price_map:
@@ -430,29 +436,56 @@ def fetch_data(
     *,
     warmup_days: int = 300
 ) -> tuple[pd.DataFrame, ...]:
-    def _get(ivl_str: str, default_limit: int) -> pd.DataFrame: 
-        if start and end:
-            if ivl_str == "1d": 
-                real_start = (
-                    pd.to_datetime(start) - pd.Timedelta(days=warmup_days)
-                ).strftime("%Y-%m-%d")
-                return alpaca_download(
-                    ticker, timeframe=ivl_str, start=real_start, end=end 
-                )
-            return alpaca_download(
-                ticker, timeframe=ivl_str, start=start, end=end 
-            )
-        return alpaca_download(
-            ticker, timeframe=ivl_str, limit=default_limit 
-        )
+    """
+    Retrieve six time-frames for *ticker* **with enough history** that all
+    indicator look-backs (up to 21) are always satisfied.
 
+    • When *start*/*end* are given (historical mode), the call *automatically*
+      pulls an extra cushion of data **behind** the requested start date:
+         – intraday (≤4 h) : +30 trading days
+         – daily           : +`warmup_days`  (default 300)
+         – weekly          : +120 weeks  (≈ 2.3 years)
+    • Live mode (no *start/end*) keeps the original limits.
+    """
+    def _get(ivl_str: str, default_limit: int) -> pd.DataFrame:
+        if start and end:                                  # ─ historical ─
+            s_dt = pd.to_datetime(start)
+            e_dt = pd.to_datetime(end)
+
+            if ivl_str in {"15m", "30m", "1h", "4h"}:
+                pad = s_dt - pd.Timedelta(days=30)          # +30 trading days
+                fetch_start = pad.strftime("%Y-%m-%d")
+
+            elif ivl_str == "1d":
+                pad = s_dt - pd.Timedelta(days=warmup_days) # +warm-up
+                fetch_start = pad.strftime("%Y-%m-%d")
+
+            elif ivl_str == "1wk":
+                pad = s_dt - pd.Timedelta(weeks=120)        # +120 weeks
+                fetch_start = pad.strftime("%Y-%m-%d")
+
+            else:                                           # fallback
+                fetch_start = start
+
+            return cached_download(
+                ticker,
+                start=fetch_start,
+                end=e_dt.strftime("%Y-%m-%d"),
+                interval=ivl_str
+            ).loc[start:end]    # slice back to the exact user range
+
+        # ─ live mode ───────────────────────────────────────────────────
+        return alpaca_download(ticker, timeframe=ivl_str, limit=default_limit)
+
+    # actual pulls ------------------------------------------------------
     df_15  = _get("15m", 60)
     df_30  = _get("30m", 60)
     df_1h  = _get("1h",  120)
-    df_4h  = _get("4h",  120) 
+    df_4h  = _get("4h",  120)
     df_1d  = _get("1d",  380)
-    df_1wk = _get("1wk", 520)
+    df_1wk = _get("1wk", 520)   # 520-bar cap in live mode (≈10 yrs)
 
+    # tidy up -----------------------------------------------------------
     for df in (df_15, df_30, df_1h, df_4h, df_1d, df_1wk):
         if "Adj Close" in df.columns and "Close" not in df.columns:
             df.rename(columns={"Adj Close": "Close"}, inplace=True)
@@ -461,11 +494,17 @@ def fetch_data(
 
 def compute_indicators(df: pd.DataFrame,
                        timeframe: str = "daily") -> pd.DataFrame:
+    """
+    Compute a broad indicator set with robust fall-backs for short or patchy
+    price series.  All TA-Lib / ta library calls are *guarded* so we never hit
+    IndexError when the look-back window is longer than the data we have.
+    """
     df = df.copy()
-    req = {"Open", "High", "Low", "Close", "Volume"}
-    if df.empty or not req.issubset(df.columns):
-        return df                                    
+    req_cols = {"Open", "High", "Low", "Close", "Volume"}
+    if df.empty or not req_cols.issubset(df.columns) or len(df) < 2:
+        return df
 
+    # ── adaptive look-back window ------------------------------------
     pct_vol = (
         df["Close"].pct_change().rolling(20).std().iloc[-1]
         if len(df) >= 21 else
@@ -474,18 +513,38 @@ def compute_indicators(df: pd.DataFrame,
 
     window = 21 if pct_vol >= 0.06 else 10 if pct_vol <= 0.01 else 14
 
-    if len(df) <= window:                           
-        return pd.DataFrame(index=df.index)         
+    # If the series is shorter than the desired window, down-size safely
+    if len(df) <= window:
+        window = max(5, len(df) - 1)           # keep at least 5-bar context
 
-    rsi  = RSIIndicator(df["Close"], window).rsi()
-    adx  = ADXIndicator(df["High"], df["Low"], df["Close"], window)
+    need_rows = window + 1                    # TA-lib needs ≥ window+1 rows
+    non_na    = df[["High", "Low", "Close"]].dropna().shape[0]
+    # -----------------------------------------------------------------
+
+    # quick helpers ---------------------------------------------------
+    def _safe_rsi(series):            # always works (short series OK)
+        return RSIIndicator(series, window).rsi()
+
+    def _manual_atr(high, low, close, win):
+        """
+        True-range computed entirely with pandas, so the result is a
+        Series and `.rolling()` works.  (The old version built a raw
+        ndarray, which had no `rolling` attribute.)
+        """
+        tr = pd.concat([
+            high - low,
+            (high - close.shift()).abs(),
+            (low  - close.shift()).abs()
+        ], axis=1).max(axis=1)
+        return tr.rolling(win, min_periods=1).mean()
+
+    # base indicators (never raise) -----------------------------------
+    rsi  = _safe_rsi(df["Close"])
     sto  = StochasticOscillator(df["High"], df["Low"], df["Close"],
                                 window, smooth_window=3)
     cci  = CCIIndicator(df["High"], df["Low"], df["Close"], window, 0.015)
     macd = MACD(df["Close"], 26, 12, 9)
     bb   = BollingerBands(df["Close"], 20, 2)
-    atr  = AverageTrueRange(df["High"], df["Low"], df["Close"], window)
-
     roc  = ROCIndicator(df["Close"], window)
     wlr  = WilliamsRIndicator(df["High"], df["Low"], df["Close"], window)
     mfi  = MFIIndicator(df["High"], df["Low"], df["Close"],
@@ -493,92 +552,116 @@ def compute_indicators(df: pd.DataFrame,
     obv  = OnBalanceVolumeIndicator(df["Close"], df["Volume"])
     cmf  = ChaikinMoneyFlowIndicator(df["High"], df["Low"], df["Close"],
                                      df["Volume"], window)
-    kc   = KeltnerChannel(df["High"], df["Low"], df["Close"],
-                          window, original_version=False)
-    dc   = DonchianChannel(df["High"], df["Low"], df["Close"], window)
+    # -----------------------------------------------------------------
 
-    df[f"RSI_{timeframe}"]         = rsi
-    df[f"ADX_{timeframe}"]         = adx.adx()
-    df[f"ADX_pos_{timeframe}"]     = adx.adx_pos()
-    df[f"ADX_neg_{timeframe}"]     = adx.adx_neg()
-    df[f"STOCHk_{timeframe}"]      = sto.stoch()
-    df[f"STOCHd_{timeframe}"]      = sto.stoch_signal()
-    df[f"CCI_{timeframe}"]         = cci.cci()
-    df[f"MACD_{timeframe}"]        = macd.macd()
-    df[f"MACD_signal_{timeframe}"] = macd.macd_signal()
-    df[f"MACD_hist_{timeframe}"]   = macd.macd_diff()
-    df[f"BB_upper_{timeframe}"]    = bb.bollinger_hband()
-    df[f"BB_lower_{timeframe}"]    = bb.bollinger_lband()
-    df[f"BB_middle_{timeframe}"]   = bb.bollinger_mavg()
-    df[f"ATR_{timeframe}"]         = atr.average_true_range()
-    df[f"ATR_pct_{timeframe}"]     = df[f"ATR_{timeframe}"] / df["Close"]
+    # ATR / Keltner ----------------------------------------------------
+    if len(df) >= need_rows and non_na >= need_rows:
+        atr_ta = AverageTrueRange(df["High"], df["Low"], df["Close"], window)
+        df[f"ATR_{timeframe}"]     = atr_ta.average_true_range()
+        df[f"ATR_pct_{timeframe}"] = df[f"ATR_{timeframe}"] / df["Close"]
 
-    df[f"ROC_{timeframe}"]         = roc.roc()
-    df[f"WR_{timeframe}"]          = wlr.williams_r()
-    df[f"MFI_{timeframe}"]         = mfi.money_flow_index()
-    df[f"OBV_{timeframe}"]         = obv.on_balance_volume()
-    df[f"CMF_{timeframe}"]         = cmf.chaikin_money_flow()
+        kc = KeltnerChannel(df["High"], df["Low"], df["Close"],
+                            window, original_version=False)
+        df[f"KC_upper_{timeframe}"]  = kc.keltner_channel_hband()
+        df[f"KC_lower_{timeframe}"]  = kc.keltner_channel_lband()
+        df[f"KC_middle_{timeframe}"] = (
+            kc.keltner_channel_mavg() if hasattr(kc, "keltner_channel_mavg")
+            else kc.keltner_channel_mband()
+        )
+    else:
+        atr = _manual_atr(df["High"], df["Low"], df["Close"])
+        ema = df["Close"].ewm(span=window, adjust=False).mean()
+        rng = atr * 1.5
+        df[f"ATR_{timeframe}"]        = atr
+        df[f"ATR_pct_{timeframe}"]    = atr / df["Close"]
+        df[f"KC_middle_{timeframe}"]  = ema
+        df[f"KC_upper_{timeframe}"]   = ema + rng
+        df[f"KC_lower_{timeframe}"]   = ema - rng
+    # -----------------------------------------------------------------
 
-    df[f"KC_upper_{timeframe}"]  = kc.keltner_channel_hband()
-    df[f"KC_lower_{timeframe}"]  = kc.keltner_channel_lband()
-    df[f"KC_middle_{timeframe}"] = (
-        kc.keltner_channel_mavg() if hasattr(kc, "keltner_channel_mavg")
-        else kc.keltner_channel_mband()
-    )
+    # DI± / DX / ADX ---------------------------------------------------
+    if len(df) >= need_rows and non_na >= need_rows:
+        try:
+            adx_ta = ADXIndicator(df["High"], df["Low"], df["Close"], window)
+            df[f"ADX_{timeframe}"]     = adx_ta.adx()
+            df[f"ADX_pos_{timeframe}"] = adx_ta.adx_pos()
+            df[f"ADX_neg_{timeframe}"] = adx_ta.adx_neg()
+        except IndexError:
+            # Fall back to manual method if ta-lib still balks
+            up  = df["High"].diff()
+            dn  = -(df["Low"].diff())
+            pos_dm = np.where((up > dn) & (up > 0), up, 0.0)
+            neg_dm = np.where((dn > up) & (dn > 0), dn, 0.0)
 
+            atr_sum = _manual_atr(df["High"], df["Low"], df["Close"]) * window
+            pos_di  = 100 * pd.Series(pos_dm, index=df.index).rolling(
+                          window, min_periods=1).sum() / atr_sum
+            neg_di  = 100 * pd.Series(neg_dm, index=df.index).rolling(
+                          window, min_periods=1).sum() / atr_sum
+            dx      = 100 * (pos_di - neg_di).abs() / (
+                          pos_di + neg_di).replace(0, np.nan)
+            adx     = dx.rolling(window, min_periods=1).mean()
+
+            df[f"ADX_{timeframe}"]     = adx
+            df[f"ADX_pos_{timeframe}"] = pos_di
+            df[f"ADX_neg_{timeframe}"] = neg_di
+    else:
+        # manual-only branch
+        up  = df["High"].diff()
+        dn  = -(df["Low"].diff())
+        pos_dm = np.where((up > dn) & (up > 0), up, 0.0)
+        neg_dm = np.where((dn > up) & (dn > 0), dn, 0.0)
+
+        atr_sum = _manual_atr(df["High"], df["Low"], df["Close"]) * window
+        pos_di  = 100 * pd.Series(pos_dm, index=df.index).rolling(
+                      window, min_periods=1).sum() / atr_sum
+        neg_di  = 100 * pd.Series(neg_dm, index=df.index).rolling(
+                      window, min_periods=1).sum() / atr_sum
+        dx      = 100 * (pos_di - neg_di).abs() / (
+                      pos_di + neg_di).replace(0, np.nan)
+        adx     = dx.rolling(window, min_periods=1).mean()
+
+        df[f"ADX_{timeframe}"]     = adx
+        df[f"ADX_pos_{timeframe}"] = pos_di
+        df[f"ADX_neg_{timeframe}"] = neg_di
+    # -----------------------------------------------------------------
+
+    # Donchian (always safe) ------------------------------------------
+    dc = DonchianChannel(df["High"], df["Low"], df["Close"], window)
     df[f"DC_upper_{timeframe}"]  = dc.donchian_channel_hband()
     df[f"DC_lower_{timeframe}"]  = dc.donchian_channel_lband()
     df[f"DC_middle_{timeframe}"] = (
         dc.donchian_channel_mavg() if hasattr(dc, "donchian_channel_mavg")
         else dc.donchian_channel_mband()
     )
+    # -----------------------------------------------------------------
 
+    # Attach remaining series -----------------------------------------
+    df[f"RSI_{timeframe}"]          = rsi
+    df[f"STOCHk_{timeframe}"]       = sto.stoch()
+    df[f"STOCHd_{timeframe}"]       = sto.stoch_signal()
+    df[f"CCI_{timeframe}"]          = cci.cci()
+    df[f"MACD_{timeframe}"]         = macd.macd()
+    df[f"MACD_signal_{timeframe}"]  = macd.macd_signal()
+    df[f"MACD_hist_{timeframe}"]    = macd.macd_diff()
+    df[f"BB_upper_{timeframe}"]     = bb.bollinger_hband()
+    df[f"BB_lower_{timeframe}"]     = bb.bollinger_lband()
+    df[f"BB_middle_{timeframe}"]    = bb.bollinger_mavg()
+    df[f"ROC_{timeframe}"]          = roc.roc()
+    df[f"WR_{timeframe}"]           = wlr.williams_r()
+    df[f"MFI_{timeframe}"]          = mfi.money_flow_index()
+    df[f"OBV_{timeframe}"]          = obv.on_balance_volume()
+    df[f"CMF_{timeframe}"]          = cmf.chaikin_money_flow()
+
+    # Higher-timeframe moving averages (if requested) -----------------
     if timeframe in {"daily", "hourly", "weekly", "1wk"}:
-        df[f"SMA20_{timeframe}"] = SMAIndicator(df["Close"], 20).sma_indicator()
-        df[f"SMA50_{timeframe}"] = SMAIndicator(df["Close"], 50).sma_indicator()
-        df[f"EMA50_{timeframe}"] = EMAIndicator(df["Close"], 50).ema_indicator()
-        df[f"EMA200_{timeframe}"]= EMAIndicator(df["Close"], 200).ema_indicator()
+        df[f"SMA20_{timeframe}"]  = SMAIndicator(df["Close"], 20).sma_indicator()
+        df[f"SMA50_{timeframe}"]  = SMAIndicator(df["Close"], 50).sma_indicator()
+        df[f"EMA50_{timeframe}"]  = EMAIndicator(df["Close"], 50).ema_indicator()
+        df[f"EMA200_{timeframe}"] = EMAIndicator(df["Close"], 200).ema_indicator()
 
     return df
 
-def enrich_higher_timeframes(df_daily: pd.DataFrame) -> pd.DataFrame:
-    # ── safety guards ────────────────────────────────────────────────────
-    if df_daily.empty:
-        return pd.DataFrame()
-
-    # try to coerce a RangeIndex built from a 'Date' column (rare case)
-    if not isinstance(df_daily.index, pd.DatetimeIndex):
-        if "Date" in df_daily.columns:
-            df_daily = (
-                df_daily.set_index("Date", drop=True)
-                        .sort_index()
-            )
-        if not isinstance(df_daily.index, pd.DatetimeIndex):
-            # still not datetime → bail out; resample would fail
-            return pd.DataFrame()
-    # --------------------------------------------------------------------
-
-    tf_map = {"W-FRI": "wk", "ME": "mth", "QE": "qtr"}
-    out_frames = []
-
-    for freq, tag in tf_map.items():
-        tf_df = (
-            compute_indicators(df_daily.resample(freq).last(), timeframe=tag)
-            .add_suffix(f"_{tag}")
-            .reindex(df_daily.index, method="ffill")
-        )
-        out_frames.append(tf_df)
-
-    htf = pd.concat(out_frames, axis=1)
-
-    # cross-time-frame helpers (only if both columns exist)
-    if {"RSI_daily", "RSI_wk"}.issubset(htf.columns.union(df_daily.columns)):
-        htf["RSI_ratio_dw"] = df_daily["RSI_daily"] / htf["RSI_wk"]
-
-    if {"EMA50_daily", "EMA50_wk"}.issubset(htf.columns.union(df_daily.columns)):
-        htf["EMA50_slope_diff"] = df_daily["EMA50_daily"] - htf["EMA50_wk"]
-
-    return htf
 
 
 def triple_barrier_labels(close: pd.Series,
@@ -655,8 +738,14 @@ def compute_anchored_vwap(df_1d):
 
     lookback_period = 252 
     recent_period = df_1d.tail(lookback_period)
+    
+    # Check if 'Low' column exists and is not all NaN
+    if 'Low' not in recent_period.columns or recent_period['Low'].isnull().all():
+        return pd.Series(np.nan, index=df_1d.index)
+        
     anchor_idx = recent_period['Low'].idxmin()
-    if pd.isna(anchor_idx):
+    
+    if pd.isna(anchor_idx): # Should be caught by isnull().all() if 'Low' was all NaN
         return pd.Series(np.nan, index=df_1d.index)
 
     df_after = df_1d.loc[anchor_idx:].copy()
@@ -685,7 +774,7 @@ def prepare_features(
     df_15m: pd.DataFrame,
     df_30m: pd.DataFrame,
     df_1h:  pd.DataFrame,
-    df_90m: pd.DataFrame, # This seems unused, 4h is used in fetch_data
+    df_4h: pd.DataFrame, 
     df_1d:  pd.DataFrame,
     df_1wk: pd.DataFrame,
     macro_df: pd.DataFrame,
@@ -698,19 +787,16 @@ def prepare_features(
     ind_15m = compute_indicators(df_15m.copy(), timeframe='15m')
     ind_30m = compute_indicators(df_30m.copy(), timeframe='30m')
     ind_1h  = compute_indicators(df_1h.copy(),  timeframe='hourly') 
-    # Assuming df_90m should be df_4h as per fetch_data. If df_90m is distinct, it needs fetching.
-    # For now, let's assume it's a typo and it means to use the 4h data if available, or skip if not.
-    # Or, if it's meant to be a specific 90m interval, it needs to be added to _tf_map and fetch_data.
-    # To prevent crash, we'll check if it's empty or use a placeholder if it's critical.
-    # Given it's passed but not explicitly fetched in fetch_data with "90m" key, this is ambiguous.
-    # Let's assume df_90m is meant to be df_4h from fetch_data, or this function needs adjustment.
-    # For safety, if it's empty and used, it should not crash.
-    # ind_90m = compute_indicators(df_90m.copy(), timeframe='90m') # Original
-    
-    df_4h = df_90m # Assuming df_90m is actually the df_4h data based on fetch_data structure
-    ind_4h  = compute_indicators(df_4h.copy(),  timeframe='4h') # Using 4h as a replacement
+    ind_4h  = compute_indicators(df_4h.copy(),  timeframe='4h') 
     
     ind_1d  = compute_indicators(df_1d.copy(),  timeframe='daily')
+
+    # Early exit if ind_1d is not viable for further processing (Fix 1)
+    if ind_1d.empty or 'Close' not in ind_1d.columns:
+        ticker_name = ticker if ticker is not None else "N/A"
+        print(Fore.YELLOW + f"Warning: Daily data (ind_1d) for ticker {ticker_name} is empty or missing 'Close' column after compute_indicators. Returning empty DataFrame from prepare_features." + Style.RESET_ALL)
+        return pd.DataFrame()
+
     ind_1d['AnchoredVWAP'] = compute_anchored_vwap(ind_1d)
     ind_1wk = compute_indicators(df_1wk.copy(), timeframe='1wk')
 
@@ -719,7 +805,7 @@ def prepare_features(
     daily_15m = to_daily(ind_15m, "15m").add_suffix('_15m')
     daily_30m = to_daily(ind_30m, "30m").add_suffix('_30m')
     daily_1h  = to_daily(ind_1h,  "1h").add_suffix('_1h')
-    daily_4h  = to_daily(ind_4h, "4h").add_suffix('_4h') # Changed from daily_90m
+    daily_4h  = to_daily(ind_4h, "4h").add_suffix('_4h') 
 
     ind_1wk = ind_1wk.reindex(ind_1d.index, method='ffill')
 
@@ -731,7 +817,7 @@ def prepare_features(
           .join(daily_15m)
           .join(daily_30m)
           .join(daily_1h)
-          .join(daily_4h) # Changed from daily_90m
+          .join(daily_4h) 
     )
 
     if macro_df is not None and not macro_df.empty:
@@ -802,6 +888,13 @@ def refine_features(features_df,
     upper = corr.where(np.triu(np.ones(corr.shape), k=1).astype(bool))
     X = X.drop(columns=[c for c in upper.columns if any(upper[c] > corr_threshold)],
                errors='ignore')
+
+    # Ensure 'Close' column is preserved
+    if 'Close' not in X.columns and 'Close' in features_df.columns:
+        X = X.join(features_df[['Close']])
+    elif 'Close' not in X.columns and 'Close' not in features_df.columns:
+        # This case should ideally not happen if prepare_features works as expected
+        print(Fore.RED + "[Error] 'Close' column missing from input to refine_features and could not be restored." + Style.RESET_ALL)
 
     return X.join(y)
 
@@ -1018,12 +1111,12 @@ def backtest_strategy(ticker: str,
     """
     Daily-lumped back-test using the six-frame fetch & stacked ensemble.
     """
-    df_15m, df_30m, df_1h, df_90m, df_1d, df_1wk = fetch_data( # df_90m is df_4h here
+    df_15m, df_30m, df_1h, df_4h, df_1d, df_1wk = fetch_data(
         ticker, start=start_date, end=end_date
     )
 
-    feat = prepare_features(df_15m, df_30m, df_1h, df_90m, # df_90m is df_4h
-                            df_1d,  df_1wk, macro_df)
+    feat = prepare_features(df_15m, df_30m, df_1h, df_4h,
+                            df_1d,  df_1wk, macro_df, ticker=ticker) 
     feat = refine_features(feat)
 
     model, _ = train_stacked_ensemble(feat)          
@@ -1039,11 +1132,13 @@ def backtest_strategy(ticker: str,
     df_pred = feat.assign(prediction=preds)
 
     trades, in_trade = [], False
-    for ts, row in df_pred.iterrows():
+    # Fix 2: Changed loop to use enumerate for integer index `i`
+    for i, (ts, row) in enumerate(df_pred.iterrows()):
         price, atr = row["Close"], row["ATR_daily"]
         if np.isnan(atr) or atr == 0:
             continue
-        if not in_trade and prob[row.name][row.prediction] >= 0.6:
+        # Fix 2: Use `prob[i]` instead of `prob[row.name]`
+        if not in_trade and prob[i][row.prediction] >= 0.6:
             dir_ = "LONG" if row.prediction == 2 else "SHORT"
             entry, stop = price, price - atr if dir_ == "LONG" else price + atr
             target = price + 2 * atr if dir_ == "LONG" else price - 2 * atr
@@ -1252,14 +1347,13 @@ def run_signals_on_watchlist(use_intraday: bool = True):
     for tkr in tickers:
         print(f"\n=== {tkr} (live) ===")
         try:
-            df15, df30, df1h, df4h, df1d, df1w = fetch_data(tkr) # df4h was df90m
+            df15, df30, df1h, df4h, df1d, df1w = fetch_data(tkr) 
         except Exception as e:
             print(f"Fetch error: {e}"); continue
 
-        # Pass df4h instead of df90m to prepare_features
         feats = (prepare_features_intraday(df30, macro_df)
                  if use_intraday else
-                 prepare_features(df15, df30, df1h, df4h, df1d, df1w, macro_df)) # df4h was df90m
+                 prepare_features(df15, df30, df1h, df4h, df1d, df1w, macro_df, ticker=tkr)) 
         feats = refine_features(feats)
         model, thr = train_stacked_ensemble(feats)
         if model is None:
@@ -1289,44 +1383,55 @@ def backtest_watchlist():
     macro_df = get_macro_data(start_arg, end_arg)
     for ticker in tickers:
         print(f"\n=== Backtesting {ticker} from {start_arg} to {end_arg} ===")
-        # In backtest_strategy, df_90m is passed, which is df_4h from fetch_data
         backtest_strategy(ticker, start_arg, end_arg, macro_df) 
 
 def show_signals_for_current_week():
+    """Print first actionable signal (if any) for each watch-list name."""
     fred_api_key = load_config()
     tickers = load_watchlist()
     if not tickers:
-        print("Your watchlist is empty."); return
+        print("Your watchlist is empty.")
+        return
 
-    preload_interval_cache(tickers)      
-
+    # ── define the 180-day look-back used for features ────────────────
     today   = datetime.date.today()
-    monday  = today - datetime.timedelta(days=today.weekday())
+    monday  = today - datetime.timedelta(days=today.weekday())          # this week’s Monday
     start_s = (monday - datetime.timedelta(days=180)).strftime("%Y-%m-%d")
     end_s   = today.strftime("%Y-%m-%d")
+
+    # pull macro once (covers full range) -- no yfinance
     macro_df = get_macro_data(start_s, end_s, fred_api_key=fred_api_key)
 
     for tkr in tickers:
         print(f"\n=== {tkr}: {monday} → {today} ===")
+
+        # key change: supply *start* & *end* so every interval (esp. 4 h)
+        # contains the full history needed for 14-/21-bar indicators
         try:
-            df15, df30, df1h, df4h, df1d, df1w = fetch_data(tkr) # df4h was df90m
-            df15, df30, df1h, df4h, df1d, df1w = ( # df4h was df90m
-                df15.loc[start_s:end_s], df30.loc[start_s:end_s],
-                df1h.loc[start_s:end_s], df4h.loc[start_s:end_s], # df4h was df90m
-                df1d.loc[start_s:end_s], df1w.loc[start_s:end_s]
+            df15, df30, df1h, df4h, df1d, df1w = fetch_data(
+                tkr, start=start_s, end=end_s
             )
         except Exception as e:
-            print(f"Fetch error: {e}"); continue
+            print(f"Fetch error: {e}")
+            continue
 
+        # no slicing required – frames already span the desired range
         all_feat = prepare_features(
-            df15, df30, df1h, df4h, df1d, df1w, # df4h was df90m
-            macro_df, drop_recent=False
+            df15, df30, df1h, df4h, df1d, df1w,
+            macro_df, drop_recent=False, ticker=tkr
         )
+        if all_feat.empty:
+            print(Fore.YELLOW +
+                  f"Insufficient data to process signals for {tkr}. Skipping."
+                  + Style.RESET_ALL)
+            continue
+
         lbl_df = refine_features(all_feat.dropna(subset=['future_class']))
         model, thr = train_stacked_ensemble(lbl_df)
         if model is None:
             continue
 
+        # walk forward through this week and print the first actionable signal
         for dt, row in all_feat.loc[monday:end_s].iterrows():
             sig = generate_signal_output(tkr, row, model, thr, {})
             if sig:
@@ -1358,6 +1463,7 @@ def signals_performance_cli():
 
         try:
             latest_bars_req = StockLatestBarRequest(symbol_or_symbols=syms)
+            _inc_api_calls() # Added API call increment
             latest_bars = _ALP_CLIENT.get_stock_latest_bar(latest_bars_req) 
             
             price_dict = {}
@@ -1368,6 +1474,8 @@ def signals_performance_cli():
             return price_dict
 
         except APIError as e:
+            if hasattr(e, 'response') and e.response and e.response.status_code == 429:
+                print(Fore.YELLOW + "Alpaca API rate limit (429) encountered in _get_last_prices. Please wait before trying again." + Style.RESET_ALL)
             print(Fore.YELLOW + f"Alpaca error in _get_last_prices: {e}" + Style.RESET_ALL)
             return {p["symbol"]: p["entry_price"] for p in open_recs}
 
@@ -1515,6 +1623,7 @@ def closed_stats_cli():
 
 def interactive_menu():
     while True:
+        print(f"\nAPI Calls Made: {get_api_call_count()}") # Added API call count print
         print("\nMain Menu:")
         print("1. Manage Watchlist")
         print("2. Run Signals on Watchlist (Live Mode)")
@@ -1614,7 +1723,6 @@ def main():
             print(f"No usable daily data for {ticker}, skipping.")
             continue
 
-        # Assuming df_4h is passed as df_90m argument to prepare_features
         features_df = prepare_features(df15, df30, df1h, df4h, df1d, df1w, macro_df, ticker=ticker) 
         if features_df.empty:
             print(f"Insufficient data for {ticker}, skipping.")
