@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 SPXL / SPXS – Intraday-Reversal Model (XGBoost)
 ==============================================
@@ -12,16 +12,17 @@ SPXL / SPXS – Intraday-Reversal Model (XGBoost)
 • Risk: 1 % of equity, stop = 0.35 % or 1×ATR, TP = 0.60 %
 • Works as:  (i) trainer / back-tester,  (ii) live decision engine
 """
-
-# ---------------------- Imports ------------------------------------------------
-import argparse, datetime as dt, os, sys
+import argparse, datetime as dt, os, pickle, sys
 from typing import List, Tuple
+
 import numpy as np
 import pandas as pd
 import yfinance as yf
 import xgboost as xgb
+from sklearn.metrics import accuracy_score, f1_score, precision_recall_fscore_support
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, precision_recall_fscore_support
+from sklearn.isotonic import IsotonicRegression      # 🔸 NEW
+import optuna   
 
 # ---------------------- Hyper-parameters --------------------------------------
 INTERVAL        = "5m"
@@ -72,6 +73,39 @@ def engineer(df: pd.DataFrame) -> pd.DataFrame:
     d.dropna(inplace=True)
     return d
 
+def triple_barrier_labels(df: pd.DataFrame) -> pd.Series:
+    """
+    +1 if TP hit first inside FWD_WINDOW
+    -1 if SL hit first
+     0 otherwise  (no trade)
+    """
+    close = df["Close"].values
+    targets = np.zeros(len(df))
+    for i in range(len(df) - FWD_WINDOW):
+        tp_lvl = close[i] * (1 + TP_PCT)
+        sl_lvl = close[i] * (1 - SL_PCT)
+        window = close[i + 1 : i + 1 + FWD_WINDOW]
+        try:
+            tp_hit = np.where(window >= tp_lvl)[0][0]
+        except IndexError:
+            tp_hit = FWD_WINDOW + 1
+        try:
+            sl_hit = np.where(window <= sl_lvl)[0][0]
+        except IndexError:
+            sl_hit = FWD_WINDOW + 1
+        if tp_hit < sl_hit:
+            targets[i] = 1
+        elif sl_hit < tp_hit:
+            targets[i] = -1
+    return pd.Series(targets, index=df.index)
+
+def dataset() -> pd.DataFrame:
+    base   = download(ETF_LONG)
+    feats  = engineer(base)
+    feats["target"] = triple_barrier_labels(feats)
+    feats = feats[feats["target"] != 0]          # only decisive bars
+    return feats
+
 # ---------------------- Label construction ------------------------------------
 def label_reversals(df: pd.DataFrame) -> pd.DataFrame:
     d = df.copy()
@@ -88,23 +122,58 @@ def dataset() -> pd.DataFrame:
     return label_reversals(engineer(base))
 
 # ---------------------- Model training ----------------------------------------
-def train(df: pd.DataFrame) -> Tuple[xgb.XGBClassifier, List[str]]:
+def optuna_objective(trial, X_tr, y_tr, X_val, y_val):
+    params = {
+        "eta":          trial.suggest_float("eta", 0.01, 0.2, log=True),
+        "max_depth":    trial.suggest_int("max_depth", 3, 9),
+        "subsample":    trial.suggest_float("subsample", 0.6, 1.0),
+        "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
+        "lambda":       trial.suggest_float("lambda", 0.0, 5.0),
+        "alpha":        trial.suggest_float("alpha", 0.0, 5.0),
+        "n_estimators": 600,
+        "objective":    "binary:logistic",
+        "eval_metric":  "logloss",
+        "n_jobs":       -1,
+    }
+    model = xgb.XGBClassifier(**params)
+    model.fit(X_tr, y_tr)
+    preds = model.predict(X_val)
+    return -f1_score(y_val, preds)               # maximise F1
+
+def train(df: pd.DataFrame) -> Tuple[xgb.XGBClassifier, IsotonicRegression, float, List[str]]:
     feats = [c for c in df.columns if c not in ("target",)]
-    X, y  = df[feats], df["target"]
-    Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=0.2, shuffle=False)
-    model = xgb.XGBClassifier(
-        n_estimators=400, max_depth=6, learning_rate=0.05,
-        subsample=0.8, colsample_bytree=0.8, eval_metric="logloss",
-        n_jobs=-1, objective="binary:logistic"
-    )
-    model.fit(Xtr, ytr)
-    preds  = model.predict(Xte)
-    prob   = model.predict_proba(Xte)[:,1]
-    acc    = accuracy_score(yte, preds)
-    prec, rec, f1, _ = precision_recall_fscore_support(yte, preds, average="binary")
+    X, y  = df[feats], (df["target"] == 1).astype(int)   # 1 = TP side
+    X_tr, X_val, y_tr, y_val = train_test_split(X, y, test_size=0.20, shuffle=False)
+
+    study = optuna.create_study(direction="minimize", show_progress_bar=False)
+    study.optimize(lambda t: optuna_objective(t, X_tr, y_tr, X_val, y_val),
+                   n_trials=60, timeout=900)
+
+    best_params = study.best_params
+    best_params.update({"n_estimators": 600, "objective": "binary:logistic",
+                        "eval_metric": "logloss", "n_jobs": -1})
+    model = xgb.XGBClassifier(**best_params)
+    model.fit(X_tr, y_tr)
+
+    # ----- probability calibration -------------------------------------------
+    raw_val_prob = model.predict_proba(X_val)[:, 1]
+    iso = IsotonicRegression(out_of_bounds="clip").fit(raw_val_prob, y_val)
+    calib_prob   = iso.transform(raw_val_prob)
+
+    # choose threshold that keeps historical win-rate ≥ 55 %
+    thresh = np.quantile(calib_prob, 1 - y_val.mean())
+
+    # report
+    preds = (calib_prob > thresh).astype(int)
+    acc   = accuracy_score(y_val, preds)
+    prec, rec, f1, _ = precision_recall_fscore_support(y_val, preds, average="binary")
     print(f"ACC {acc:.2f}  PREC {prec:.2f}  REC {rec:.2f}  F1 {f1:.2f}")
-    model.save_model(MODEL_PATH)
-    return model, feats
+
+    # persist three objects in one pickle
+    with open(MODEL_PATH, "wb") as f:
+        pickle.dump({"xgb": model, "iso": iso, "thresh": thresh, "feats": feats}, f)
+
+    return model, iso, thresh, feats
 
 # ---------------------- Back-test engine --------------------------------------
 class Backtest:
@@ -171,10 +240,12 @@ def main():
     args = p.parse_args()
 
     if args.train or not os.path.exists(MODEL_PATH):
-        model, feats = train(dataset())
+        model, iso, THRESH, feats = train(dataset())
     else:
-        model = xgb.XGBClassifier(); model.load_model(MODEL_PATH)
-        feats = [c for c in dataset().columns if c not in ("target",)]
+        with open(MODEL_PATH, "rb") as f:
+            bundle = pickle.load(f)
+    model, iso, THRESH, feats = bundle["xgb"], bundle["iso"], bundle["thresh"], bundle["feats"]
+
 
     if args.bt:
         Backtest(model, feats).run(dataset())
