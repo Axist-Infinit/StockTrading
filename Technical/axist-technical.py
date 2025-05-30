@@ -25,16 +25,13 @@ import numpy as np
 import yfinance as yf
 import urwid
 from pathlib import Path
-
 from watchlist_utils import load_watchlist, save_watchlist, manage_watchlist
 from ta.momentum import RSIIndicator, StochasticOscillator
-from ta.trend import CCIIndicator
-from ta.trend import MACD, EMAIndicator
+from ta.trend import MACD, EMAIndicator, CCIIndicator, ADXIndicator
 from ta.volatility import BollingerBands, AverageTrueRange
 from xgboost import XGBClassifier
 from sklearn.metrics import classification_report
 from sklearn.utils import resample
-from ta.trend import ADXIndicator
 from ta.volatility import AverageTrueRange
 from ta.volume import MFIIndicator  # optional if you want more volume-based features
 from ta.volatility import DonchianChannel  # optional, if needed
@@ -567,8 +564,6 @@ def prepare_features(
     ind_5m['AnchoredVWAP_5m']   = compute_anchored_vwap(ind_5m,  lookback_bars=2000)
     ind_30m['AnchoredVWAP_30m'] = compute_anchored_vwap(ind_30m, lookback_bars=200)
     ind_1h['AnchoredVWAP_1h']   = compute_anchored_vwap(ind_1h,  lookback_bars=120)
-
-    # existing daily vwap
     ind_1d['AnchoredVWAP']      = compute_anchored_vwap(ind_1d,  lookback_bars=252)
 
     # ---------- collapse intraday to daily ---------------------------
