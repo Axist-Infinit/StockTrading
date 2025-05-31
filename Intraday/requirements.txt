@@ -1,0 +1,19 @@
+numpy>=1.20.0
+pandas>=1.3.0
+yfinance>=0.2.0
+xgboost>=1.5.0
+scikit-learn>=1.0.0
+optuna>=2.10.0
+lightgbm>=3.2.0
+torch>=1.10.0
+# Consider adding specific versions if compatibility issues arise, e.g.:
+# numpy==1.23.5
+# pandas==1.5.3
+# yfinance==0.2.37
+# xgboost==1.7.6
+# scikit-learn==1.3.0
+# optuna==3.5.0
+# lightgbm==4.1.0
+# torch==2.1.0
+# torchvision==0.16.0  # Often installed with torch, add if needed for Stockformer or other torch uses
+# torchaudio==2.1.0   # Same as torchvision
