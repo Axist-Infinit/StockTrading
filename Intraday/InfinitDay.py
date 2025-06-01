@@ -29,6 +29,7 @@ from lightgbm import LGBMClassifier
 import torch
 import torch.nn as nn
 from sklearn.linear_model import LogisticRegression
+import requests # Ensure this import is added at the top of the file
 
 
 # ====== 3. STACKED ENSEMBLE  (XGB + LightGBM + Stockformer)  ==================
@@ -360,15 +361,58 @@ os.makedirs(CACHE_DIR, exist_ok=True)
 GRID_STEPS  = 21               # 0 = spot, ±10 ticks of 0.1 %
 
 # ---------------------- Data utilities ----------------------------------------
+# START_DATE, END_DATE, INTERVAL are assumed to be defined globally in InfinitDay.py
+
 def download(tkr: str) -> pd.DataFrame:
-    df = yf.download(tkr, start=START_DATE, end=END_DATE,
-                     interval=INTERVAL, progress=False)
-    if df.empty: raise ValueError(f"No data for {tkr}")
-    df = df.tz_localize(None)
-    # If columns are MultiIndex (e.g., ('SPXL', 'Open')), flatten them for single ticker
-    if isinstance(df.columns, pd.MultiIndex) and len(df.columns.levels[0]) == 1:
-        df.columns = df.columns.droplevel(0) # Drops the top level (ticker name)
-    return df
+    df_result = pd.DataFrame() # Initialize df_result as an empty DataFrame
+    try:
+        session = requests.Session()
+        headers = {'User-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+        session.headers.update(headers)
+
+        df_temp = yf.download(tkr, start=START_DATE, end=END_DATE,
+                              interval=INTERVAL, progress=False, timeout=30, session=session)
+
+        if df_temp.empty:
+            print(f"Warning: No data downloaded for {tkr} (yf.download returned empty).")
+            # df_result remains the empty DataFrame initialized earlier
+        else:
+            df_result = df_temp # Assign downloaded data
+
+    except Exception as e:
+        error_str = str(e).lower()
+        # More robust check for rate limit error messages
+        is_rate_limit_error = ("yfratelimiterror" in error_str or
+                               "too many requests" in error_str or
+                               "rate limited" in error_str or
+                               "429 client error" in error_str or # Check for 429 status
+                               "temporary error" in error_str) # Added for general temporary issues
+
+        if is_rate_limit_error:
+            print(f"Warning: Rate limit error or temporary issue encountered for ticker {tkr}. Returning empty DataFrame. Error: {e}")
+            # df_result remains the empty DataFrame initialized earlier
+        else:
+            # For any other exception during the download, wrap it in a ValueError.
+            raise ValueError(f"Failed to download data for {tkr} due to an unexpected error: {e}")
+
+    # Post-processing, only if df_result is not empty
+    if not df_result.empty:
+        # Only attempt tz_localize if the index is timezone-aware
+        if df_result.index.tz is not None:
+            try:
+                df_result = df_result.tz_localize(None)
+            except TypeError as tz_e:
+                # This might happen if it's already naive but somehow df_result.index.tz was not None.
+                print(f"Note: Could not make timezone naive for {tkr} (already naive or other issue). Error: {tz_e}")
+
+        # Flatten MultiIndex columns
+        # Ensure columns is actually a MultiIndex and has levels to prevent errors
+        if isinstance(df_result.columns, pd.MultiIndex) and df_result.columns.nlevels > 1:
+            # Check if the top level has a single value (usually the ticker)
+            if len(df_result.columns.get_level_values(0).unique()) == 1:
+                 df_result.columns = df_result.columns.droplevel(0)
+
+    return df_result
 
 def rsi(series: pd.Series, n: int = 2) -> pd.Series:
     delta = series.diff()
@@ -793,7 +837,7 @@ def price_scenario_prob(base_row: pd.Series,
     r["Low"]   *= scale
 
     # recompute quick features that depend on close
-    r["dist_vwap"] = (r["Close"] - r["vwap"]) / r["vwap"]
+    r["dist_vwap"] = (r["Close"] - ["vwap"]) / r["vwap"]
 
     # The original bb_z recalculation logic from the prompt was:
     # ma20 = base_row["Close"] * scale / (1 + base_row["bb_z"] *
