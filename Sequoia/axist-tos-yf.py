@@ -17,6 +17,7 @@ from ta.trend import CCIIndicator
 from ta.trend import MACD, EMAIndicator
 from ta.volatility import BollingerBands, AverageTrueRange
 from xgboost import XGBClassifier
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import classification_report
 from sklearn.utils import resample
 from ta.trend import ADXIndicator, CCIIndicator, MACD, EMAIndicator, WMAIndicator
@@ -419,6 +420,39 @@ def fetch_data(ticker, start=None, end=None, intervals=None, warmup_days=300):
     return tuple(cleaned_dfs)
 
 
+def _add_custom_features(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+    """
+    Adds:
+      • VWAP-distance z-score
+      • log-RVOL(20)
+      • Order-Flow Imbalance (OFI)
+    """
+    if df.empty or not {"Close", "Open", "High", "Low", "Volume"}.issubset(df.columns):
+        return df
+
+    # ---- VWAP z-score ----------------------------------------------------
+    vwap_col = ("AnchoredVWAP" if timeframe == "daily"
+                else f"AnchoredVWAP_{timeframe}")
+    atr_col  = f"ATR_{timeframe}"
+    if vwap_col in df.columns and atr_col in df.columns:
+        df[f"VWAP_z_{timeframe}"] = (
+            (df["Close"] - df[vwap_col]) /
+            (df[atr_col].replace(0, np.nan))
+        )
+
+    # ---- Relative Volume -------------------------------------------------
+    rvol = np.log( (df["Volume"] + 1) /
+                   (df["Volume"].rolling(20).mean().replace(0, np.nan) + 1) )
+    df[f"RVOL_{timeframe}"] = rvol
+
+    # ---- Order-Flow Imbalance -------------------------------------------
+    ofi = ((df["Close"] - df["Open"]) /
+           (df["High"] - df["Low"] + 1e-5)) * df["Volume"]
+    df[f"OFI_{timeframe}"] = ofi
+
+    return df
+
+
 def compute_indicators(df: pd.DataFrame, timeframe: str = "daily") -> pd.DataFrame:
     """
     Compute the core indicator set *plus* the exact “Sequoia” flags and
@@ -496,7 +530,25 @@ def compute_indicators(df: pd.DataFrame, timeframe: str = "daily") -> pd.DataFra
         df["Sequoia_short"] = (~macd_green & ~hull_green & ~dmi_green &
                                solid  & lshadow_ok & vol_ok & atr_ok)
 
-    return df
+    return _add_custom_features(df, timeframe)
+
+
+def _dynamic_horizon(atr: pd.Series,
+                     price: pd.Series,
+                     factor: int = 15,
+                     min_bars: int = 5,
+                     max_bars: int = 20) -> int:
+    """
+    Return a walk-forward horizon length whose default ≈ 5–20 bars.
+
+    horizon = ceil(  ATR% · factor  )
+      where  ATR%  = median( ATR / Close ) over the past 20 bars
+    """
+    if atr.empty or price.empty:
+        return min_bars
+    atr_pct = (atr / price).rolling(20).median().iloc[-1]
+    est     = int(np.ceil(atr_pct * factor))
+    return max(min_bars, min(est, max_bars))
 
 
 def compute_anchored_vwap(
@@ -581,11 +633,20 @@ def prepare_features(
     if features_df.empty:
         return features_df
 
-    atr = features_df['ATR_daily'].fillna(0)
-    upper = features_df['Close'] + 2.0 * atr
-    lower = features_df['Close'] - 2.0 * atr
-    closes = features_df['Close'].values
-    labels = np.ones(len(features_df), dtype=int)
+    # ----- dynamic horizon length ----------------------------------------
+    horizon = _dynamic_horizon(features_df["ATR_daily"], features_df["Close"])
+    closes  = features_df["Close"].values
+    labels  = np.ones(len(features_df), dtype=int)
+
+    # It seems the original code had 'upper' and 'lower' defined before this block.
+    # We need to ensure they are defined if they were part of the block being replaced
+    # or ensure they are still valid in the context of this new horizon.
+    # The issue description implies this new block replaces the "horizon = 10" block,
+    # which also included the ATR, upper, lower, closes, and labels definitions.
+    # Assuming 'upper' and 'lower' still need to be calculated based on ATR and Close:
+    atr = features_df['ATR_daily'].fillna(0) # Keep ATR calculation
+    upper = features_df['Close'] + 2.0 * atr # Keep upper band calculation
+    lower = features_df['Close'] - 2.0 * atr # Keep lower band calculation
 
     for i in range(len(features_df) - horizon):
         win = closes[i + 1 : i + 1 + horizon]
@@ -772,8 +833,17 @@ def tune_threshold_and_train(features_df):
         tree_method='hist',      # GPU
         device='cuda'    # GPU
     )
-    final_model.fit(X_full, final_y)
-    return final_model, best_thr
+    # final_model.fit(X_full, final_y) # This .fit() call is replaced
+
+    # --- isotonic calibration -------------------------------------------
+    # from sklearn.calibration import CalibratedClassifierCV # Import at top
+    calib = CalibratedClassifierCV(base_estimator=final_model, # Now final_model is defined but not yet fit
+                                   method="isotonic",
+                                   cv=3)
+    # The CalibratedClassifierCV will fit the base_estimator (final_model) as part of its own .fit() process.
+    calib.fit(X_full, final_y) # This will fit final_model for each fold and then the calibrator
+
+    return calib, best_thr
 
 def generate_signal_output(ticker, latest_row, model, thr):
     """
@@ -960,7 +1030,8 @@ def prepare_features_intraday(
     df_30m = df_30m.join(daily.reindex(df_30m.index, method='ffill'), rsuffix='_daily')
 
     # ---------- triple-barrier labelling on 30-min bars --------------
-    horizon_bars = 16
+    horizon_bars = _dynamic_horizon(df_30m["ATR_intraday"], df_30m["Close"],
+                                    factor=15, min_bars=8, max_bars=40)
     atr_col = 'ATR_intraday'
     if atr_col not in df_30m.columns:
         df_30m[atr_col] = df_30m['Close'].rolling(14).std().fillna(0)
