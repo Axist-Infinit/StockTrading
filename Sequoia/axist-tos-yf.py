@@ -2,6 +2,7 @@
 
 
 import os
+import time
 import sys
 import argparse
 import datetime
@@ -79,6 +80,7 @@ def yf_download_wrapper(tickers, period=None, interval="1d", start=None, end=Non
     global YF_CALLS
     YF_CALLS += 1
     try:
+        time.sleep(0.5)
         df = yf.download(
             tickers=tickers,
             period=period,
@@ -1204,6 +1206,7 @@ def show_signals_since_start_of_week() -> None:
         ("380d", "1d")
     ]:
         preload_interval_cache(all_syms, period=period, interval=interval)
+        time.sleep(1)
 
     # 2) Define date boundaries
     today   = datetime.datetime.today().replace(hour=0, minute=0,
