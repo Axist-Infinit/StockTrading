@@ -1,21 +1,23 @@
 [
   {
-    "symbol": "AAPL",
-    "direction": "LONG",
-    "entry_price": 150.00,
-    "stop_loss": 145.00,
-    "profit_target": 160.00,
-    "status": "Open",
-    "entry_date": "2023-10-01",
-    "notes": "Test signal for Urwid dashboard"
-  },
-  {
     "symbol": "MSFT",
     "direction": "SHORT",
-    "entry_price": 300.00,
-    "stop_loss": 305.00,
-    "profit_target": 290.00,
+    "entry_price": 300.0,
+    "stop_loss": 305.0,
+    "profit_target": 290.0,
     "status": "Closed",
     "entry_date": "2023-09-15"
+  },
+  {
+    "symbol": "AAPL",
+    "direction": "LONG",
+    "entry_price": 150.0,
+    "stop_loss": 145.0,
+    "profit_target": 160.0,
+    "status": "Target",
+    "entry_date": "2023-10-01",
+    "notes": "Test signal for Urwid dashboard",
+    "exit_date": "2025-06-01",
+    "exit_price": 200.66
   }
 ]
