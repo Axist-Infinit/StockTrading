@@ -550,6 +550,11 @@ def hyperparam_tune_fundamental_rf(X, y):
 
 
 def train_real_fundamental_ml_model(ticker):
+    # try load cached model ----------------------------------------------------
+    cached = load_model(ticker, "fund", train_real_fundamental_ml_model)
+    if cached is not None:
+        print(f"[Fundamental ML for {ticker}] Loaded cached model.") # Optional: add a print statement
+        return cached
     """
     On-demand, gather advanced SBF fundamentals *just* for the specified `ticker`,
     build a small dataset, do hyperparam tuning, then cache the info.
@@ -603,6 +608,8 @@ def train_real_fundamental_ml_model(ticker):
         # or store the DataFrame as well if you want.
     }
     save_analysis_cache(cache)
+    print(f"[Fundamental ML for {ticker}] Saving model.")
+    save_model(best_model, ticker, "fund", train_real_fundamental_ml_model)
 
     return best_model
 
@@ -831,6 +838,11 @@ def hyperparam_tune_technical_rf(X, y):
     return best_model
 
 def train_technical_ml_model(ticker, feature_selection_method=None):
+    # try load cached model ----------------------------------------------------
+    cached = load_model(ticker, "tech", train_technical_ml_model)
+    if cached is not None and not feature_selection_method: # If feature_selection_method is active, retrain
+        print(f"[XGB] Loaded cached technical model for {ticker}") # Optional: add a print statement
+        return cached
     """
     1) For daily & weekly, fetch 3 years; for 5m,30m,1h => 1 year
     2) Compute full set of RSI, MACD, Boll, OBV, Ichimoku on each timeframe
@@ -904,6 +916,8 @@ def train_technical_ml_model(ticker, feature_selection_method=None):
     acc = accuracy_score(y_val, val_preds)
     print(f"[XGB] final val acc= {acc:.3f}, #rows= {len(merged_df)}")
 
+    print(f"[XGB] Saving technical model for {ticker}") # Optional: add a print statement
+    save_model(model, ticker, "tech", train_technical_ml_model)
     return model
 
 
