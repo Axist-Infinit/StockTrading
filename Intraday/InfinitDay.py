@@ -47,12 +47,9 @@ class Stockformer(nn.Module):
         # Ensure nn.Linear and nn.TransformerEncoderLayer/nn.TransformerEncoder are available
         # These come from torch.nn, which should be imported as nn.
         self.embed = nn.Linear(n_features, d_model)
-        encoder_layer = nn.TransformerEncoderLayer(d_model=d_model,
-                                                   nhead=nhead,
-                                                   dim_feedforward=d_model*4, # Common practice
-                                                   batch_first=True)
-        self.transformer = nn.TransformerEncoder(encoder_layer,
-                                                 num_layers=num_layers)
+        encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead,
+                                                   batch_first=True) # batch_first=True is important
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         self.cls = nn.Sequential(nn.Flatten(),
                                  nn.Linear(seq_len * d_model, 1),
                                  nn.Sigmoid())
@@ -72,314 +69,270 @@ class Stockformer(nn.Module):
 # import torch.nn as nn (should be imported)
 # class Stockformer should be defined before this function.
 
-def train_ensemble(X_train_df, y_train_np, X_val_df, y_val_np, # Changed to accept DataFrames for X for .values access
-                   seq_len: int = 12, feature_cols: list = None):
-    """
-    Returns dict of fitted models + meta-learner.
-    X_* for trees = 2-d array (samples × features) -> now expects DataFrames to use .values
+def train_ensemble(X_train, y_train, X_val, y_val, seq_len: int = 12, feature_cols: list = None):
+    """ Returns dict of fitted models + meta-learner.
+    X_* for trees = 2-d array (samples × features)
     For Stockformer we build 3-d tensor (samples × seq_len × features)
-    Assumes X_train_df is sorted chronologically so rolling windows work.
-    y_train_np and y_val_np are expected to be numpy arrays.
+    Assumes X_train is sorted chronologically so rolling windows work.
     """
-    import numpy as np # Local import for safety, though global is expected
-    import pandas as pd # Local import for safety
-    import torch # Local import for safety
-    import torch.nn as nn # Local import for safety
-    # Ensure xgb, LGBMClassifier, LogisticRegression are available from global imports
+    # Ensure necessary libraries are available (already imported at script level)
+    import numpy as np
+    import pandas as pd # Though not explicitly used in this version, good to have if X_train were df
+    import torch
+    import torch.nn as nn
+    # XGBoost (xgb), LightGBM (LGBMClassifier), Stockformer class, LogisticRegression
+    # are assumed to be available from global imports / definitions.
 
     models = {}
 
-    # Convert X DataFrames to numpy arrays for XGBoost and LightGBM
-    X_train_np = X_train_df[feature_cols].values if isinstance(X_train_df, pd.DataFrame) and feature_cols else X_train_df
-    X_val_np = X_val_df[feature_cols].values if isinstance(X_val_df, pd.DataFrame) and feature_cols else X_val_df
-
-    if not feature_cols:
-        if isinstance(X_train_df, pd.DataFrame):
-            feature_cols = X_train_df.columns.tolist()
-        elif isinstance(X_train_np, np.ndarray) and X_train_np.ndim == 2:
-             print("Warning: feature_cols not provided to train_ensemble, deriving from X_train shape if possible or using generic names.")
-             # Cannot get names from numpy array directly, this list will be for reference in bundle
-             feature_cols = [f'feat_{i}' for i in range(X_train_np.shape[1])]
-        else:
-            raise ValueError("feature_cols must be provided if X_train is not a DataFrame.")
-
-
     # ---- XGBoost -------------------------------------------------------------
-    print("Training XGBoost for ensemble...")
-    # Ensure xgb is imported and available
-    if 'xgb' not in globals(): raise NameError("xgboost (xgb) not imported or not in global scope.")
-
+    # print("Training XGBoost for ensemble...") # Optional: for verbosity
     xgb_params = dict(n_estimators=400, max_depth=6, learning_rate=0.05,
                       subsample=0.8, colsample_bytree=0.8,
                       objective="binary:logistic", eval_metric="logloss",
-                      n_jobs=-1, random_state=42) # Added random_state
+                      n_jobs=-1, random_state=42) # Added random_state for reproducibility
     xgb_clf = xgb.XGBClassifier(**xgb_params)
-    xgb_clf.fit(X_train_np, y_train_np)
+    xgb_clf.fit(X_train, y_train) # Assumes X_train is a NumPy array or compatible
     models["xgb"] = xgb_clf
-    print("XGBoost training complete.")
+    # print("XGBoost training complete.")
 
     # ---- LightGBM ------------------------------------------------------------
-    print("Training LightGBM for ensemble...")
-    # Ensure LGBMClassifier is imported and available
-    try: from lightgbm import LGBMClassifier # Check if it was imported
-    except ImportError: raise NameError("LGBMClassifier not imported.")
-
+    # print("Training LightGBM for ensemble...")
     lgb_params = dict(n_estimators=500, num_leaves=64,
                       learning_rate=0.05, subsample=0.8,
                       colsample_bytree=0.8, objective="binary", random_state=42) # Added random_state
     lgb_clf = LGBMClassifier(**lgb_params)
-    lgb_clf.fit(X_train_np, y_train_np)
+    lgb_clf.fit(X_train, y_train) # Assumes X_train is a NumPy array or compatible
     models["lgb"] = lgb_clf
-    print("LightGBM training complete.")
+    # print("LightGBM training complete.")
 
     # ---- Stockformer ---------------------------------------------------------
-    print("Training Stockformer for ensemble...")
-    # Ensure Stockformer class is defined
-    if 'Stockformer' not in globals(): raise NameError("Stockformer class not defined.")
+    # print("Training Stockformer for ensemble...")
+    # Ensure X_train is a NumPy array for .shape and slicing.
+    # If X_train is Pandas DataFrame, use X_train.values
+    # The issue context implies X_train, X_val are already numpy arrays by this point.
 
-    # Expects X_train_df to be a DataFrame for .values, or X_train_np if DataFrame not passed
-    # The input X for make_tensor should be a numpy array.
-    # If X_train_df was passed, use its .values. If X_train_np was the original input, use that.
-    source_X_for_stockformer_train = X_train_df[feature_cols].values if isinstance(X_train_df, pd.DataFrame) else X_train_np
+    # If feature_cols is provided and X_train is a DataFrame (not typical here based on signature)
+    # X_train_values = X_train[feature_cols].values if isinstance(X_train, pd.DataFrame) and feature_cols else X_train
+    # For this function, assume X_train IS a numpy array.
+    X_train_values = X_train
 
-    n_feat = source_X_for_stockformer_train.shape[1]
+    n_feat = X_train_values.shape[1]
 
-    def make_tensor_train(X_numpy_array, sequence_len): # Renamed to avoid conflict if make_tensor is global
-        # X_numpy_array should be the .values from the DataFrame or the numpy array directly
+    # Inner function to create sequences for Stockformer
+    def make_tensor(X_numpy_array): # X_numpy_array must be a 2D numpy array
         xs_list = []
-        # Start from sequence_len to ensure enough lookback
-        for idx_t in range(sequence_len, len(X_numpy_array) +1): # +1 to include last possible window
-            # Slice from idx_t - sequence_len to idx_t
-            window = X_numpy_array[idx_t - sequence_len : idx_t]
-            if window.shape[0] == sequence_len: # Ensure window is of correct length
-                 xs_list.append(torch.tensor(window, dtype=torch.float32))
-            # else: print(f"Skipping window at idx_t {idx_t} due to insufficient length {window.shape[0]}") # Debug
-        if not xs_list:
-            # This case means no valid sequences could be formed, e.g. if len(X_numpy_array) < sequence_len
-            # Return an empty tensor or handle as an error
-            print(f"Warning: No sequences created for Stockformer. Input length {len(X_numpy_array)}, seq_len {sequence_len}")
-            return torch.empty((0, sequence_len, n_feat), dtype=torch.float32) # n_feat must be defined
+        # Start from seq_len-1 to create the first sequence X[0:seq_len]
+        # Loop up to len(X_numpy_array) - 1 to get the last sequence X[end-seq_len:end]
+        # The target for X[idx-seq_len:idx] is y[idx-1]
+        for idx in range(seq_len, len(X_numpy_array) + 1): # Corrected loop range
+            window = X_numpy_array[idx-seq_len:idx, :] # Ensure slicing is correct for 2D array
+            xs_list.append(torch.tensor(window, dtype=torch.float32))
+        if not xs_list: # Handle case where X_numpy_array is too short
+            return torch.empty((0, seq_len, n_feat), dtype=torch.float32)
         return torch.stack(xs_list)
 
-    Xs_train_tensor = make_tensor_train(source_X_for_stockformer_train, seq_len)
-    # Align y_train: it should correspond to the *end* of each sequence in Xs_train_tensor
-    # If Xs_train_tensor has N samples, these correspond to original indices seq_len-1 to N+seq_len-2
-    # So y_train_np should be sliced from index seq_len-1 onwards.
-    # Example: if seq_len=12, first sequence is X[0:12], target is y[11]
-    # make_tensor_train starts making sequences for target at index `seq_len-1` in original data
-    # So, y_train_np needs to be sliced from `seq_len-1` up to `len(y_train_np)`
-    # Number of samples in Xs_train_tensor is len(source_X_for_stockformer_train) - seq_len + 1
+    Xs_train_tensor = make_tensor(X_train_values)
 
+    # Align y_train: target for sequence X[idx-seq_len:idx] is y[idx-1]
+    # So, if make_tensor creates sequences ending at original indices k (from seq_len-1 to len-1),
+    # the y_train should be y[seq_len-1 : len(y_train)]
+    # Number of samples in Xs_train_tensor is len(X_train_values) - seq_len + 1
     num_stockformer_samples = Xs_train_tensor.shape[0]
+
     if num_stockformer_samples == 0:
-        print("Stockformer training skipped: no valid training sequences generated.")
+        print("Stockformer training skipped: no valid training sequences generated (X_train too short).")
         models["stk"] = None # Mark as not trained
     else:
-        # y_train_np needs to be sliced from (seq_len -1) up to (seq_len -1 + num_stockformer_samples)
-        # Example: X is 100 samples, seq_len is 10.
-        # First sequence is X[0:10], target y[9]. Last sequence X[90:100], target y[99].
-        # make_tensor_train loop: range(10, 101). idx_t=10 -> X[0:10]. Target y[9].
-        # So y_stockformer_train = y_train_np[seq_len-1 : len(y_train_np)] -> this gives all possible targets
-        # We need to align it with number of samples from make_tensor_train
-        y_stockformer_train = torch.tensor(y_train_np[seq_len-1 : seq_len-1 + num_stockformer_samples], dtype=torch.float32).view(-1,1)
+        # y_train needs to be sliced from (seq_len-1) up to (seq_len-1 + num_stockformer_samples)
+        y_stockformer_train = torch.tensor(y_train[seq_len-1 : seq_len-1 + num_stockformer_samples],
+                                           dtype=torch.float32).view(-1,1)
 
         if Xs_train_tensor.shape[0] != y_stockformer_train.shape[0]:
-             print(f"Shape mismatch! Xs_train: {Xs_train_tensor.shape}, ys_train_stk: {y_stockformer_train.shape}. Skipping Stockformer.")
+             print(f"Shape mismatch! Xs_train_tensor: {Xs_train_tensor.shape}, y_stockformer_train: {y_stockformer_train.shape}. Skipping Stockformer.")
              models["stk"] = None
         else:
             net = Stockformer(n_feat, seq_len) # Stockformer class must be defined
-            loss_fn = nn.BCELoss() # BCELoss expects target to be float
+            loss_fn = nn.BCELoss()
             optim_ = torch.optim.Adam(net.parameters(), lr=1e-3)
 
-            net.train() # Set model to training mode
+            net.train()
             for epoch in range(5): # Small epoch count for demo
                 optim_.zero_grad()
                 preds_stk = net(Xs_train_tensor)
                 loss = loss_fn(preds_stk, y_stockformer_train)
                 loss.backward()
                 optim_.step()
-                # print(f"Stockformer Epoch {epoch+1}/5, Loss: {loss.item():.4f}") # Optional print
-            models["stk"] = net.eval() # Set model to evaluation mode
-            print("Stockformer training complete.")
+                # print(f"Stockformer Epoch {epoch+1}/5, Loss: {loss.item():.4f}") # Optional
+            models["stk"] = net.eval()
+            # print("Stockformer training complete.")
 
     # ---- Meta-learner --------------------------------------------------------
-    print("Training meta-learner...")
-    # Ensure LogisticRegression is imported
-    try: from sklearn.linear_model import LogisticRegression # Check if it was imported
-    except ImportError: raise NameError("LogisticRegression not imported.")
+    # print("Training meta-learner...")
+    # X_val is assumed to be a NumPy array here.
+    # If it were a DataFrame, use X_val.values or X_val[feature_cols].values
 
-    # Build out-of-fold probabilities for validation set
-    # X_val_np is for xgb and lgb
-    # For Stockformer, X_val_df (or X_val_np if df not passed) is used to make tensor
-    source_X_for_stockformer_val = X_val_df[feature_cols].values if isinstance(X_val_df, pd.DataFrame) else X_val_np
+    # Predictions from base models on validation set
+    xgb_meta_preds = xgb_clf.predict_proba(X_val)[:,1]
+    lgb_meta_preds = lgb_clf.predict_proba(X_val)[:,1]
 
-    # Predictions from base models
-    xgb_meta_preds = xgb_clf.predict_proba(X_val_np)[:,1]
-    lgb_meta_preds = lgb_clf.predict_proba(X_val_np)[:,1]
-
-    stk_meta_preds_list = []
+    stk_meta_preds_numpy = np.array([]) # Initialize
     if models.get("stk"):
-        Xs_val_tensor = make_tensor_train(source_X_for_stockformer_val, seq_len) # Use same make_tensor
+        # Create sequences from X_val for Stockformer
+        # X_val_values = X_val[feature_cols].values if isinstance(X_val, pd.DataFrame) and feature_cols else X_val
+        X_val_values = X_val # Assuming X_val is already a numpy array
+        Xs_val_tensor = make_tensor(X_val_values) # Use the same make_tensor
+
         if Xs_val_tensor.shape[0] > 0:
-            stk_meta_preds_list = models["stk"](Xs_val_tensor).detach().numpy().flatten()
+            stk_meta_preds_numpy = models["stk"](Xs_val_tensor).detach().numpy().flatten()
         else: # If no validation sequences for stockformer
-            stk_meta_preds_list = np.array([0.5] * len(X_val_np)) # Fallback: neutral probability
-            # This needs alignment if stk_meta_preds_list has different length
-            # The y_meta will be y_val_np[seq_len-1 : seq_len-1 + Xs_val_tensor.shape[0]]
-            # If Xs_val_tensor is empty, this means we can't use stockformer predictions for meta-learner
-            # A more robust solution would be to only stack models that trained successfully and produced predictions
-            print("Warning: Stockformer produced no validation sequences. Meta-learner might be suboptimal.")
-    else: # If Stockformer wasn't trained
-        # Fallback: If stk model doesn't exist, use a neutral prediction (0.5) for stacking
-        # The length must match other meta predictions (xgb_meta_preds, lgb_meta_preds)
-        # This path is problematic if we need to align y_meta.
-        # For simplicity, if stk is None, we might exclude it from stacking or use this placeholder.
-        # Let's assume for now, if stk is None, we may need to adjust X_meta and y_meta alignment.
-        # The issue example assumes stk is always present in the meta learner.
-        # So if models['stk'] is None, this step will likely fail or produce poor results.
-        # A robust implementation would handle this by conditional stacking.
-        # Given the y_meta slicing below, we'll assume stk_meta_preds need to be of length len(y_val_np[seq_len-1:])
-        num_samples_for_stk_val_y = len(y_val_np) - (seq_len -1) if len(y_val_np) >= seq_len else 0
-        stk_meta_preds_list = np.full(num_samples_for_stk_val_y, 0.5) if num_samples_for_stk_val_y > 0 else np.array([])
+            # This means y_meta alignment will be tricky.
+            # The original issue code for meta-learner implies stk preds are always there.
+            # Let's align with the number of samples y_val[seq_len:] would have.
+            num_expected_stk_val_samples = len(X_val_values) - seq_len + 1 if len(X_val_values) >= seq_len else 0
+            stk_meta_preds_numpy = np.full(num_expected_stk_val_samples, 0.5) # Fallback
+            if num_expected_stk_val_samples <=0 : stk_meta_preds_numpy = np.array([])
+            print("Warning: Stockformer produced no validation sequences for meta-learner. Using fallback.")
+    else: # Stockformer was not trained or skipped
+        num_expected_stk_val_samples = len(X_val) - seq_len + 1 if len(X_val) >= seq_len else 0
+        stk_meta_preds_numpy = np.full(num_expected_stk_val_samples, 0.5) # Fallback
+        if num_expected_stk_val_samples <=0 : stk_meta_preds_numpy = np.array([])
+        print("Warning: Stockformer model is None. Using fallback predictions for meta-learner.")
 
+    # Align y_meta: y_val needs to be sliced like y_train for Stockformer
+    # Target for sequence X_val[idx-seq_len:idx] is y_val[idx-1]
+    y_meta = y_val[seq_len-1 : seq_len-1 + len(stk_meta_preds_numpy)] # Align with actual STK preds length
 
-    # Align y_meta: y_val_np needs to be sliced like y_train_np for Stockformer
-    # This means y_meta corresponds to the targets for which Stockformer could make predictions
-    # If Stockformer produced predictions on Xs_val_tensor (num_stk_val_samples),
-    # then y_meta should be y_val_np[seq_len-1 : seq_len-1 + num_stk_val_samples]
-    num_stk_val_samples = Xs_val_tensor.shape[0] if 'Xs_val_tensor' in locals() and Xs_val_tensor.shape[0] > 0 else 0
+    # Align XGB and LGB predictions with y_meta and stk_meta_preds_numpy
+    # The first (seq_len-1) samples of X_val don't have corresponding Stockformer predictions.
+    # So, XGB/LGB predictions for these initial samples are not used in stacking if STK is involved.
+    xgb_meta_preds_aligned = xgb_meta_preds[seq_len-1 : seq_len-1 + len(stk_meta_preds_numpy)]
+    lgb_meta_preds_aligned = lgb_meta_preds[seq_len-1 : seq_len-1 + len(stk_meta_preds_numpy)]
 
-    if num_stk_val_samples > 0 :
-        y_meta = y_val_np[seq_len-1 : seq_len-1 + num_stk_val_samples]
-        # Align other model predictions to this length
-        xgb_meta_preds_aligned = xgb_meta_preds[seq_len-1 : seq_len-1 + num_stk_val_samples]
-        lgb_meta_preds_aligned = lgb_meta_preds[seq_len-1 : seq_len-1 + num_stk_val_samples]
-        # stk_meta_preds_list should already be this length from Xs_val_tensor
-        if len(stk_meta_preds_list) != num_stk_val_samples: # Should not happen if logic is correct
-            print(f"STK meta preds length mismatch: {len(stk_meta_preds_list)} vs {num_stk_val_samples}. Readjusting.")
-            # This is a fallback, ideally make_tensor_train for val and y_val slicing are robust
-            stk_meta_preds_list = np.full(num_stk_val_samples, 0.5) # Fallback to neutral
-
+    # Check if all prediction arrays for meta-learner have the same number of samples
+    if not (len(xgb_meta_preds_aligned) == len(lgb_meta_preds_aligned) == len(stk_meta_preds_numpy) == len(y_meta)):
+        print(f"Meta-learner input array length mismatch after alignment attempts:")
+        print(f"  XGB: {len(xgb_meta_preds_aligned)}, LGB: {len(lgb_meta_preds_aligned)}, STK: {len(stk_meta_preds_numpy)}, y_meta: {len(y_meta)}")
+        # Fallback: if lengths don't match, meta-learner training might fail or be unreliable.
+        # This could happen if X_val is very short.
+        # If stk_meta_preds_numpy is empty, then y_meta, xgb_aligned, lgb_aligned should also be empty.
+        if len(stk_meta_preds_numpy) == 0: # No data for stockformer path
+            print("No data for stockformer path in meta-learner. Attempting meta-learner with full XGB/LGB preds if possible.")
+            # This case would mean X_val was shorter than seq_len.
+            # The issue's example doesn't deeply cover this edge case for meta-learner construction.
+            # For now, if this happens, meta learner might not be trained.
+            X_meta = np.array([]) # Empty, so meta won't be trained
+        else: # Some other mismatch, try to proceed but warn
+             min_len = min(len(xgb_meta_preds_aligned), len(lgb_meta_preds_aligned), len(stk_meta_preds_numpy), len(y_meta))
+             xgb_meta_preds_aligned = xgb_meta_preds_aligned[:min_len]
+             lgb_meta_preds_aligned = lgb_meta_preds_aligned[:min_len]
+             stk_meta_preds_numpy = stk_meta_preds_numpy[:min_len]
+             y_meta = y_meta[:min_len]
+             print(f"Adjusted meta-learner input arrays to min_len: {min_len}")
+             if min_len == 0: X_meta = np.array([])
+             else: X_meta = np.column_stack([xgb_meta_preds_aligned, lgb_meta_preds_aligned, stk_meta_preds_numpy])
+    elif len(y_meta) == 0 : # If y_meta is empty (e.g. X_val was too short for any STK preds)
+        print("Meta-learner training skipped: No data available for y_meta (X_val likely too short).")
+        X_meta = np.array([]) # Empty, so meta won't be trained
+    else:
         X_meta = np.column_stack([
             xgb_meta_preds_aligned,
             lgb_meta_preds_aligned,
-            stk_meta_preds_list # This should be correctly sized from Xs_val_tensor
+            stk_meta_preds_numpy
         ])
-    else: # Case where Stockformer produced no valid predictions (e.g. X_val too short)
-        print("Warning: Stockformer produced no valid validation predictions. Meta-learner will use only XGB and LGBM.")
-        # Use full X_val_np for XGB and LGBM, and full y_val_np
-        y_meta = y_val_np
-        X_meta = np.column_stack([
-            xgb_meta_preds, # Full length
-            lgb_meta_preds  # Full length
-        ])
-        # Note: If this path is taken, stacked_predict will also need to know to only use xgb, lgb
 
-    if X_meta.shape[0] == 0: # If no data for meta learner
-        print("Meta-learner training skipped: No data available for X_meta.")
-        models["meta"] = None
-    else:
+    if X_meta.shape[0] > 0 and X_meta.shape[0] == len(y_meta):
         meta = LogisticRegression(random_state=42).fit(X_meta, y_meta) # Added random_state
         models["meta"] = meta
-        print("Meta-learner training complete.")
+        # print("Meta-learner training complete.")
+    else:
+        print("Meta-learner training skipped: Input data (X_meta) is empty or mismatched with y_meta.")
+        models["meta"] = None
+
 
     models["seq_len"] = seq_len # Store for inference
     models["feature_cols"] = feature_cols # Store for inference
-    if num_stk_val_samples == 0 : # Flag if stockformer was excluded from meta
-        models["meta_excluded_stk"] = True
+    # Flag if stockformer was effectively excluded from meta-learner due to no preds
+    if models.get("stk") is None or stk_meta_preds_numpy.size == 0 :
+        models["meta_stk_fallback"] = True # Indicates STK path had issues or no data
 
     return models
 
 
-def stacked_predict(models: dict, X_latest_np: np.ndarray) -> float:
+def stacked_predict(models: dict, X_latest: np.ndarray) -> float:
+    """ Predict calibrated probability for a single sample.
+    X_latest must contain at least seq_len rows of feature history.
     """
-    Predict calibrated probability for a single new sample or a batch.
-    X_latest_np must contain at least `seq_len` rows of feature history if Stockformer is used.
-    If predicting for a single new instance, X_latest_np would be (seq_len, n_features).
-    The prediction is for the time step *after* the last row in X_latest_np.
-    """
-    import numpy as np # Local import for safety
-    import torch # Local import for safety
+    import numpy as np # Local import for safety, though global is expected
+    import torch       # Local import for safety
 
     # Ensure models dictionary contains necessary components
-    if not all(k in models for k in ["xgb", "lgb", "meta", "seq_len", "feature_cols"]):
-        # Stockformer ('stk') might be optional if 'meta_excluded_stk' is True
-        if not (models.get("meta_excluded_stk") and 'stk' not in models):
-             print("Warning: `models` dictionary in stacked_predict is missing key components.")
-             return 0.0 # Return neutral/error probability
+    required_keys = ["xgb", "lgb", "meta", "seq_len"] # feature_cols is not directly used by predict
+    if not all(k in models for k in required_keys):
+        print("Warning: `models` dictionary in stacked_predict is missing key components (xgb, lgb, meta, or seq_len).")
+        # `stk` model might be missing if models.get("meta_stk_fallback") is True
+        if not models.get("meta_stk_fallback", False) and "stk" not in models:
+            print("Warning: `stk` model missing and meta_stk_fallback is not set. Prediction might be unreliable.")
+        # Depending on strictness, could return 0.0 or raise error
+        return 0.0 # Return neutral/error probability
 
-    seq_len = models["seq_len"]
-    # For XGB & LGBM, we predict on the most recent set of features, i.e., the last row of X_latest_np
-    # X_latest_np is expected to be (num_samples_for_prediction, n_features) or (seq_len, n_features)
-    # If X_latest_np has more rows than 1 (e.g. seq_len rows for stockformer), take last for xgb/lgb
+    # For XGB & LGBM, predict on the most recent set of features (the last row of X_latest)
+    # X_latest is expected to be (seq_len, n_features) for a single prediction context.
+    if X_latest.ndim != 2:
+        raise ValueError(f"X_latest must be a 2D array (seq_len, n_features), got {X_latest.ndim}D")
 
-    # If X_latest_np is shaped (seq_len, n_features), it means we're predicting for ONE instance
-    # after this sequence. So, xgb/lgb use the features from X_latest_np[-1].
-    # If X_latest_np is shaped (num_instances > 1, n_features), it means we're batch predicting.
-    # For now, let's assume X_latest_np is for ONE new prediction, so it's (seq_len, n_features)
-    # or just (1, n_features) if seq_len=1 (though ensemble implies seq_len > 1 for stockformer)
+    xgb_lgb_input = X_latest[-1:, :] # Takes the last row, keeps it 2D for predict_proba
 
-    if X_latest_np.ndim == 2: # e.g. (seq_len, n_features) or (1, n_features)
-        xgb_lgb_input = X_latest_np[-1:, :] # Takes the last row, keeps it 2D
-    elif X_latest_np.ndim == 3: # e.g. (batch_size, seq_len, n_features)
-        # This is more for batch prediction with Stockformer.
-        # For xgb/lgb, we'd take the last feature set from each sequence in the batch.
-        # xgb_lgb_input = X_latest_np[:, -1, :]
-        print("Warning: stacked_predict received 3D X_latest_np. Assuming xgb/lgb predict on last slice. Untested path.")
-        xgb_lgb_input = X_latest_np[:, -1, :]
-    else:
-        raise ValueError(f"X_latest_np has unsupported ndim: {X_latest_np.ndim}")
+    xgb_p = models["xgb"].predict_proba(xgb_lgb_input)[:,1] # Should be (1,)
+    lgb_p = models["lgb"].predict_proba(xgb_lgb_input)[:,1] # Should be (1,)
 
-    xgb_p = models["xgb"].predict_proba(xgb_lgb_input)[:,1]
-    lgb_p = models["lgb"].predict_proba(xgb_lgb_input)[:,1]
+    stk_p_item = 0.5 # Default neutral if stk not used or fails
 
-    stk_p_val = 0.5 # Default neutral if stk not used or fails
-    if models.get("stk") and not models.get("meta_excluded_stk"):
-        # Stockformer expects input of shape [batch, seq_len, n_features]
-        # If X_latest_np was (seq_len, n_features) for one prediction, add batch dim
-        if X_latest_np.ndim == 2 and X_latest_np.shape[0] == seq_len:
-            xf_tensor = torch.tensor(X_latest_np, dtype=torch.float32).unsqueeze(0)
-        elif X_latest_np.ndim == 3 and X_latest_np.shape[1] == seq_len: # Already batched
-            xf_tensor = torch.tensor(X_latest_np, dtype=torch.float32)
-        else: # Shape not suitable for stockformer with current seq_len
-            print(f"Warning: X_latest_np shape {X_latest_np.shape} not directly usable for Stockformer with seq_len {seq_len}. Using fallback for stk_p.")
-            # This might cause issues if meta learner expects stk_p
-            # Fallback to a neutral prediction for stk_p. Length should match xgb_p, lgb_p.
-            # This path indicates a potential issue in how data is passed or if seq_len doesn't match.
-            stk_p = np.full_like(xgb_p, 0.5) # Match length of other preds
-            # If stk_p needs to be a scalar for single prediction:
-            stk_p_val = 0.5
+    if models.get("stk") and not models.get("meta_stk_fallback", False) :
+        seq_len = models["seq_len"]
+        if X_latest.shape[0] < seq_len:
+            print(f"Warning: X_latest has {X_latest.shape[0]} rows, less than seq_len {seq_len}. STK prediction might be unreliable or fail.")
+            # Fallback, or could raise error earlier
 
-        if 'xf_tensor' in locals(): # If tensor was created
-            stk_p = models["stk"](xf_tensor).detach().numpy().flatten() # .item() if single, .flatten() if batch
-            # If xgb_p is scalar (single prediction), stk_p should also be scalar
-            if xgb_p.size == 1 and stk_p.size == 1:
-                stk_p_val = stk_p[0]
-            elif xgb_p.size == stk_p.size : # Batch prediction, sizes match
-                 stk_p_val = stk_p # Keep as array
-            else: # Size mismatch, fallback
-                print(f"Warning: stk_p size {stk_p.size} mismatch with xgb_p size {xgb_p.size}. Using fallback for stk_p_val.")
-                stk_p_val = np.full_like(xgb_p, 0.5) if xgb_p.size > 1 else 0.5
-
-
-    # Prepare input for meta-learner
-    if models.get("meta_excluded_stk"):
-        meta_in = np.column_stack([xgb_p, lgb_p])
-    else: # Stockformer was included
-        # Ensure stk_p_val is correctly shaped (scalar or array matching xgb_p, lgb_p)
-        if isinstance(stk_p_val, float) and isinstance(xgb_p, np.ndarray): # Convert scalar stk_p_val to array
-            stk_p_val_final = np.full_like(xgb_p, stk_p_val)
-        elif isinstance(stk_p_val, np.ndarray) and stk_p_val.shape != xgb_p.shape: # Reshape if necessary (e.g. (1,) vs (1,1))
-            stk_p_val_final = stk_p_val.reshape(xgb_p.shape) if stk_p_val.size == xgb_p.size else np.full_like(xgb_p, 0.5)
+        # Stockformer expects input [batch, seq_len, n_features]
+        # X_latest should be (seq_len, n_features), so unsqueeze to (1, seq_len, n_features)
+        # Take the last `seq_len` rows from X_latest. If X_latest is already exactly (seq_len, n_features), this is fine.
+        # If X_latest has more than seq_len rows, this ensures we take the correct slice.
+        stk_input_np = X_latest[-seq_len:, :]
+        if stk_input_np.shape[0] != seq_len: # Should ideally not happen if X_latest is prepared correctly
+             print(f"Warning: STK input shape {stk_input_np.shape} after slicing for seq_len {seq_len} is not as expected. Using fallback for STK prediction.")
         else:
-            stk_p_val_final = stk_p_val
+            xf_tensor = torch.tensor(stk_input_np, dtype=torch.float32).unsqueeze(0)
+            stk_p_tensor = models["stk"](xf_tensor) # Output is a tensor e.g., tensor([[0.123]])
+            stk_p_item = stk_p_tensor.item() # Convert to scalar Python float
+    elif models.get("meta_stk_fallback", False):
+        # print("Debug: Using fallback for STK prediction in stacked_predict due to meta_stk_fallback=True")
+        pass # stk_p_item remains 0.5
+    else: # stk model is None and meta_stk_fallback is False (should have been caught by initial check)
+        # print("Debug: STK model is None in stacked_predict. Using fallback for STK prediction.")
+        pass # stk_p_item remains 0.5
 
-        meta_in = np.column_stack([xgb_p, lgb_p, stk_p_val_final])
 
-    final_prob = models["meta"].predict_proba(meta_in)[:,1]
+    # Meta-learner input: needs to be a 2D array, e.g. (1, num_base_models)
+    # xgb_p, lgb_p are numpy arrays of shape (1,)
+    # stk_p_item is a scalar
 
-    # If predicting for a single instance, return a float
-    return float(final_prob[0]) if final_prob.size == 1 else final_prob
+    # If meta_stk_fallback is True, the meta learner was trained without STK features.
+    # This part needs to align with how train_ensemble constructed X_meta.
+    # The issue's train_ensemble always includes a value for STK in X_meta (even if it's a fallback 0.5).
+    # So, meta_in should always have 3 features.
+    meta_in_list = [xgb_p[0], lgb_p[0], stk_p_item]
+    meta_in_array = np.array([meta_in_list]) # Reshape to (1, 3)
+
+    if models.get("meta"):
+        final_prob_array = models["meta"].predict_proba(meta_in_array)[:,1] # Should be (1,)
+        final_prob = float(final_prob_array[0])
+    else:
+        print("Warning: Meta-learner model ('meta') is missing. Returning average of XGB and LGBM.")
+        # Fallback if meta model isn't available for some reason
+        final_prob = float((xgb_p[0] + lgb_p[0]) / 2.0)
+
+    return final_prob
 
 
 # ---------------------- Hyper-parameters --------------------------------------
@@ -390,7 +343,8 @@ MAX_HOLD        = 6           # 6x5-min bars  (approx 30 min)
 TREND_TH        = 0.0020      # 🔸 trend strength ≥ 0.20 % (underlying)
 REV_TH          = 0.0035      # 🔸 opposite move ≥ 0.35 %
 TP_PCT          = 0.0060      # take-profit 0.60 %
-STOP_PCT        = 0.0035      # hard stop 0.35 %
+SL_PCT          = 0.0035      # –0.35 % stop-loss
+STOP_PCT        = 0.0035      # hard stop 0.35 % (retained if used elsewhere, SL_PCT is for TBL)
 ATR_WIN         = 14
 # PROB_TH         = 0.60  # Deprecated: Thresholds are now per-regime and stored in the model bundle.
 START_DATE      = (dt.date.today() - dt.timedelta(days=50)).isoformat()
@@ -554,25 +508,24 @@ def engineer(df: pd.DataFrame) -> pd.DataFrame:
     return d
 
 
-# ====== 1. BETTER LABELS — TRIPLE-BARRIER  (non-overlapping)  ================
-# Constants like TP_PCT, SL_PCT, MAX_HOLD are assumed to be defined globally in InfinitDay.py
-# For default parameters, we reference them. If they are not global when this function
-# is defined, Python will raise NameError. They are defined in the Hyper-parameters section.
+# ====== 1. BETTER LABELS — TRIPLE-BARRIER (non-overlapping) ================
+TP_PCT = 0.0060 # +0.60 % take–profit
+SL_PCT = 0.0035 # –0.35 % stop-loss
+MAX_HOLD = 6 # 6×5-min bars (≈30 min)
 
-def triple_barrier_labels(df: pd.DataFrame,
-                          tp: float = TP_PCT,  # Assumes TP_PCT is global
-                          sl: float = SL_PCT,  # Assumes SL_PCT is global
-                          max_hold: int = MAX_HOLD) -> pd.Series: # Assumes MAX_HOLD is global
+def triple_barrier_labels(df: pd.DataFrame, tp: float = TP_PCT, sl: float = SL_PCT, max_hold: int = MAX_HOLD) -> pd.Series:
+    """ Non-overlapping triple-barrier labelling.
+    +1 → take-profit hit first
+    -1 → stop hit first
+    0 → no decisive event / padded rows skipped
     """
-    Non-overlapping triple-barrier labelling.
-    +1 -> take-profit hit first
-    -1 -> stop hit first
-     0 -> no decisive event / padded rows skipped
-    """
+    # Ensure numpy and pandas are imported, typically at the script's top level.
+    # For safety within a function if it were to be isolated:
     import numpy as np
     import pandas as pd
 
-    if df.empty or "Close" not in df.columns:
+    if "Close" not in df.columns:
+        # Or raise error, or return empty series with expected name
         return pd.Series(dtype="int8", index=df.index, name="target")
 
     close = df["Close"].values
@@ -580,35 +533,37 @@ def triple_barrier_labels(df: pd.DataFrame,
 
     i = 0
     # Ensure max_hold is treated as an int for the loop condition and window slicing
-    max_hold_int = int(max_hold)
+    # The issue snippet defines MAX_HOLD as int, so direct use is fine if it's passed correctly.
+    # If max_hold parameter could be float, int(max_hold) would be safer.
+    # Given the default is MAX_HOLD (int), this should be fine.
 
-    while i < len(df) - max_hold_int:
+    while i < len(df) - max_hold: # Ensure enough bars left for a full hold period
         # Check if there's enough data for the look-forward window from current position 'i'
-        # The window starts at i+1 and needs max_hold_int bars.
-        # So, the last index needed is i + max_hold_int.
-        # If i + max_hold_int >= len(close), then close[i + 1 : i + 1 + max_hold_int] might be short or empty.
-        if i + max_hold_int >= len(close): # Corrected boundary condition
-            break
+        # The window starts at i+1 and needs max_hold bars.
+        # So, the last index needed is i + max_hold.
+        # If i + max_hold >= len(close), then close[i + 1 : i + 1 + max_hold] might be short or empty.
+        # This check is subtly handled by the while condition: len(df) - max_hold ensures that
+        # i + max_hold will at most be len(df) -1, so i + 1 + max_hold can be len(df).
+        # Slicing `close[i + 1 : i + 1 + max_hold]` is thus safe.
 
         tp_price = close[i] * (1 + tp)
         sl_price = close[i] * (1 - sl)
+        window = close[i + 1 : i + 1 + max_hold]
 
-        # Window is from bar i+1 up to i+1+max_hold_int-1
-        window = close[i + 1 : i + 1 + max_hold_int]
-
-        if len(window) == 0: # Should be prevented by the while condition and boundary check
+        if len(window) == 0: # Should be prevented by the while condition
             i += 1
             continue
 
+        # first indices of TP / SL hits (or large sentinel)
         try:
-            # np.where returns a tuple of arrays; [0][0] gets the first index from the first array
+            # np.where returns a tuple of arrays; [0] gets the array of indices, [0] gets the first index
             tp_idx = np.where(window >= tp_price)[0][0] + 1 # +1 because window is offset by 1 from 'i'
         except IndexError:
-            tp_idx = max_hold_int + 1 # If not found, consider it happens after max_hold_int
+            tp_idx = max_hold + 1 # If not found, consider it happens after max_hold
         try:
             sl_idx = np.where(window <= sl_price)[0][0] + 1 # +1 for same reason
         except IndexError:
-            sl_idx = max_hold_int + 1
+            sl_idx = max_hold + 1
 
         if tp_idx < sl_idx:
             labels[i] = 1
@@ -616,82 +571,87 @@ def triple_barrier_labels(df: pd.DataFrame,
         elif sl_idx < tp_idx:
             labels[i] = -1
             i += sl_idx        # skip overlapping region
-        else: # This includes the case where both tp_idx and sl_idx are max_hold_int + 1 (no hit)
+        else: # This includes the case where both tp_idx and sl_idx are max_hold + 1 (no hit)
+              # or if they were somehow equal and less than max_hold + 1 (e.g. hit at same bar)
             i += 1             # undecided – move one bar forward
 
     return pd.Series(labels, index=df.index, name="target")
 
 
-# ====== 2. LIQUIDITY / ORDER-FLOW FEATURES  ===================================
-
+# ====== 2. LIQUIDITY / ORDER-FLOW FEATURES ===================================
 def orderflow_features(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Augments a 5-minute OHLCV DataFrame with liquidity & micro-structure stats.
+    """ Augments a 5-minute OHLCV DataFrame with liquidity & micro-structure stats.
     Works on standard Yahoo OHLCV (no tick data required).
     """
+    # Ensure numpy and pandas are imported, typically at the script's top level.
     import numpy as np
     import pandas as pd
 
     d = df.copy()
     if d.empty:
+        # Return an empty DataFrame with expected columns if needed by downstream processes
+        # For now, returning the empty copy as per original logic
         return d
 
     # Ensure required columns are present
-    required_ohlc = ["Open", "High", "Low", "Close", "Volume"] # Adjusted to common case
+    required_ohlc = ["Open", "High", "Low", "Close", "Volume"]
     for col in required_ohlc:
         if col not in d.columns:
             print(f"Warning: Column {col} not found in orderflow_features. Returning original DataFrame.")
-            return df # Return original df if essential columns are missing
+            # Potentially, return d and let downstream handle missing new columns,
+            # or return df to signal no modification. Issue example implies it should work.
+            return df
 
     # intrabar spread & depth proxies
-    d["hl_spread_pct"] = (d["High"] - d["Low"]) / (d["Close"] + 1e-9) # Added epsilon for safety
-    d["close_off_high"] = (d["High"] - d["Close"]) / (d["High"] - d["Low"] + 1e-9)
-    d["close_off_low"]  = (d["Close"] - d["Low"])  / (d["High"] - d["Low"] + 1e-9)
+    # Ensure High, Low, Close are numeric and not zero for denominators
+    d["hl_spread_pct"] = (d["High"] - d["Low"]) / (d["Close"].replace(0, 1e-9) + 1e-9)
+    # For close_off_high/low, (High - Low) can be zero. Add epsilon.
+    high_minus_low = d["High"] - d["Low"]
+    d["close_off_high"] = (d["High"] - d["Close"]) / (high_minus_low.replace(0, 1e-9) + 1e-9)
+    d["close_off_low"]  = (d["Close"] - d["Low"])  / (high_minus_low.replace(0, 1e-9) + 1e-9)
 
     # rudimentary Amihud illiquidity (|ret| / $Vol)
     d["ret"] = d["Close"].pct_change()
     d["dollar_vol"] = d["Close"] * d["Volume"]
     # Ensure dollar_vol is not zero before division for Amihud
-    d["amihud"] = (d["ret"].abs() / (d["dollar_vol"].replace(0, 1e-9) + 1e-9)) # replace 0s in dollar_vol too
+    d["amihud"] = (d["ret"].abs() / (d["dollar_vol"].replace(0, 1e-9) + 1e-9)).fillna(0) # fillna(0) for resulting NaNs
 
     # rolling order-flow imbalance
-    up_vol   = np.where(d["ret"] > 0, d["Volume"], 0)
-    down_vol = np.where(d["ret"] < 0, d["Volume"], 0)
+    # Ensure 'ret' and 'Volume' are numeric
+    up_vol   = np.where(d["ret"].fillna(0) > 0, d["Volume"], 0) # fillna for ret before comparison
+    down_vol = np.where(d["ret"].fillna(0) < 0, d["Volume"], 0)
 
-    rolling_window_ofi = 6
+    rolling_window_ofi = 6 # As per issue example (rolling(6))
 
-    # Ensure index alignment for Series operations if df's index isn't default RangeIndex
+    # Ensure index alignment for Series operations if df's index isn't default RangeIndex or is non-unique
+    # The issue uses pd.Series(up_vol).rolling(6) which implicitly uses a new RangeIndex if up_vol is a raw numpy array.
+    # To respect df's index:
     sum_up_vol = pd.Series(up_vol, index=d.index).rolling(rolling_window_ofi, min_periods=1).sum()
     sum_down_vol = pd.Series(down_vol, index=d.index).rolling(rolling_window_ofi, min_periods=1).sum()
-    # Ensure up_vol and down_vol are arrays for direct addition before pd.Series conversion
-    total_vol_for_rolling = up_vol + down_vol
+    total_vol_for_rolling = up_vol + down_vol # This is correct as numpy arrays
     sum_total_vol = pd.Series(total_vol_for_rolling, index=d.index).rolling(rolling_window_ofi, min_periods=1).sum()
 
-    d["vol_imb"] = (sum_up_vol - sum_down_vol) / (sum_total_vol.replace(0, 1e-9) + 1e-9) # replace 0s
+    d["vol_imb"] = (sum_up_vol - sum_down_vol) /                    (sum_total_vol.replace(0, 1e-9) + 1e-9)
+    d["vol_imb"] = d["vol_imb"].fillna(0) # fillna for resulting NaNs from division or rolling
 
     # 20-bar median spread for regime use
-    d["med_spread20"] = d["hl_spread_pct"].rolling(20, min_periods=1).median()
-
-    # Fill NaNs that may have been created (e.g. from pct_change, rolling ops at the beginning)
-    # It's often better to fill NaNs at the very end or let them propagate if subsequent logic handles them.
-    # For these specific features, 0 or bfill/ffill might be appropriate.
-    cols_to_fill_na = ["amihud", "vol_imb", "med_spread20", "ret"]
-    for col_ff in cols_to_fill_na:
-        if col_ff in d.columns:
-            if col_ff == "med_spread20": # Median spread can be backfilled then zero-filled
-                d[col_ff] = d[col_ff].fillna(method='bfill').fillna(0)
-            elif col_ff == "ret": # pct_change makes first row NaN
-                 d[col_ff] = d[col_ff].fillna(0) # Fill first NaN ret with 0
-            else: # amihud, vol_imb can be 0 if not calculable
-                d[col_ff] = d[col_ff].fillna(0)
+    d["med_spread20"] = d["hl_spread_pct"].rolling(20, min_periods=1).median().fillna(method='bfill').fillna(0)
 
     # Drop intermediate columns used only for calculation
-    # Check if 'ret' and 'dollar_vol' are in columns before dropping to avoid KeyError
     cols_to_drop = []
     if "ret" in d.columns: cols_to_drop.append("ret")
     if "dollar_vol" in d.columns: cols_to_drop.append("dollar_vol")
     if cols_to_drop:
         d.drop(columns=cols_to_drop, inplace=True)
+
+    # Fill any remaining NaNs in the newly created columns, perhaps with 0 or using ffill/bfill
+    # This depends on how downstream functions expect these features.
+    # For example, amihud, vol_imb, med_spread20 were already filled.
+    # hl_spread_pct, close_off_high, close_off_low might have NaNs if input data had NaNs.
+    new_feature_cols = ["hl_spread_pct", "close_off_high", "close_off_low", "amihud", "vol_imb", "med_spread20"]
+    for new_col in new_feature_cols:
+        if new_col in d.columns:
+             d[new_col] = d[new_col].fillna(0) # Or a more sophisticated fill strategy
 
     return d
 
@@ -725,49 +685,77 @@ def label_reversals(df: pd.DataFrame) -> pd.DataFrame:
     return d
 
 def dataset() -> pd.DataFrame:
-    base   = download(ETF_LONG)
-    feats  = engineer(base)
-    # The following functions are assumed to be defined elsewhere as per plan:
-    # feats = orderflow_features(feats)
-    # feats["target"] = triple_barrier_labels(feats, max_hold=MAX_HOLD) # Pass MAX_HOLD
-    # For now, to make the script runnable without these functions defined,
-    # we will call the existing/renamed functions or placeholder logic.
-    # This will need to be manually updated when the actual functions are available.
+    # Global constants like ETF_LONG, MAX_HOLD are assumed to be defined.
+    # Functions engineer, orderflow_features, triple_barrier_labels are assumed to be defined.
+    # yf (yfinance) and pd (pandas) are assumed to be imported.
 
-    # Attempt to call orderflow_features if it exists, else skip with a message
+    print("Starting dataset generation...") # Optional: for verbosity
+    base = download(ETF_LONG) # download() is an existing helper in the script
+    if base.empty:
+        print("Warning: Downloaded data is empty. Returning empty DataFrame.")
+        return pd.DataFrame()
+    print(f"Data downloaded. Shape: {base.shape}")
+
+    feats = engineer(base) # engineer() is an existing helper in the script
+    if feats.empty:
+        print("Warning: Data is empty after engineer(). Returning empty DataFrame.")
+        return pd.DataFrame()
+    print(f"Features engineered. Shape after engineer(): {feats.shape}")
+
+    # Call the newly integrated orderflow_features function
+    # Ensure orderflow_features is available in the global scope.
     if 'orderflow_features' in globals() and callable(globals()['orderflow_features']):
         feats = orderflow_features(feats)
+        if feats.empty: # orderflow_features might return original df if required cols missing
+            print("Warning: Data is empty or unchanged after orderflow_features(). Check for warnings from orderflow_features.")
+            # Depending on strictness, could return empty or proceed if feats is just the original df
+            # For now, assume if it's empty, it's problematic.
+            if feats.empty: return pd.DataFrame()
+        print(f"Orderflow features added. Shape after orderflow_features(): {feats.shape}")
     else:
-        print("WARNING: orderflow_features function not found, skipping this step in dataset().")
+        print("ERROR: orderflow_features function not found. Cannot proceed with dataset generation.")
+        return pd.DataFrame() # Or raise an error
 
-    # Attempt to call new triple_barrier_labels if it exists, else use old or label_reversals
+    # Call the newly integrated triple_barrier_labels function
+    # Ensure triple_barrier_labels is available in the global scope.
     if 'triple_barrier_labels' in globals() and callable(globals()['triple_barrier_labels']):
-        import inspect
-        try:
-            sig = inspect.signature(globals()['triple_barrier_labels'])
-            if 'max_hold' in sig.parameters: # Check for new signature
-                feats["target"] = triple_barrier_labels(feats, max_hold=MAX_HOLD) # Call new one
-            elif '_old_triple_barrier_labels' in globals() and callable(globals()['_old_triple_barrier_labels']):
-                print("WARNING: New triple_barrier_labels signature mismatch, using _old_triple_barrier_labels in dataset().")
-                feats["target"] = _old_triple_barrier_labels(feats)
-            else: # Fallback to label_reversals if new TBL has wrong sig and old doesn't exist
-                print("WARNING: New triple_barrier_labels signature mismatch and _old_triple_barrier_labels not found, using label_reversals in dataset().")
-                feats = label_reversals(feats) # label_reversals already creates 'target'
-        except (ValueError, TypeError): # Handle cases where signature cannot be inspected
-            print("WARNING: Could not inspect signature of triple_barrier_labels, using label_reversals in dataset().")
-            feats = label_reversals(feats) # label_reversals already creates 'target'
-    elif '_old_triple_barrier_labels' in globals() and callable(globals()['_old_triple_barrier_labels']):
-        print("WARNING: New triple_barrier_labels not found, using _old_triple_barrier_labels in dataset().")
-        feats["target"] = _old_triple_barrier_labels(feats)
-    else: # Fallback to label_reversals if no triple_barrier_labels defined
-        print("WARNING: triple_barrier_labels (new or old) not defined, falling back to label_reversals for target creation in dataset().")
-        feats = label_reversals(feats) # This function creates 'target' column
-
-    # Ensure 'target' column exists before filtering
-    if 'target' in feats.columns:
-        feats = feats[feats["target"] != 0]          # only decisive bars
+        # The new triple_barrier_labels uses MAX_HOLD as a default parameter value,
+        # sourcing it from the global scope. So, no need to pass it explicitly here if defaults are used.
+        # The issue's usage example is `feats["target"] = triple_barrier_labels(feats)`
+        target_labels = triple_barrier_labels(feats) # df, tp, sl, max_hold
+        if target_labels.empty and not feats.empty: # Labels empty but feats were not
+             print("Warning: triple_barrier_labels returned empty Series but features were present. Check TBL logic.")
+             # Assign empty target to allow filtering to still work (results in empty df)
+             feats["target"] = pd.Series(dtype='int8', index=feats.index)
+        else:
+            feats["target"] = target_labels
+        print(f"Triple-barrier labels generated. Shape after adding target: {feats.shape}")
     else:
-        print("WARNING: 'target' column not found after labeling attempts in dataset(). Cannot filter decisive bars.")
+        print("ERROR: triple_barrier_labels function not found. Cannot proceed with dataset generation.")
+        return pd.DataFrame() # Or raise an error
+
+    # Ensure 'target' column exists before filtering (it should, from TBL)
+    if 'target' in feats.columns:
+        # Keep only decisive bars (+1 or -1). The issue's example doesn't explicitly show this filtering
+        # for the `train_ensemble` input, but the original `dataset` function did it.
+        # The triple_barrier_labels function produces 0 for non-decisive events.
+        # For training, we usually only want +1 or -1.
+        # The issue's y is `(feats["target"] == 1).astype(int).values`, implying filtering might happen later
+        # or that `0` labels are handled. Let's retain the filtering for now as it was in original dataset fn.
+        feats_filtered = feats[feats["target"] != 0].copy() # Use .copy() to avoid SettingWithCopyWarning later
+        if feats_filtered.empty and not feats.empty:
+            print("Warning: No decisive bars found after triple_barrier_labels (target != 0).")
+        print(f"Filtered for decisive bars (target != 0). Shape: {feats_filtered.shape}")
+        feats = feats_filtered
+    else:
+        print("Warning: 'target' column not found after labeling attempts in dataset(). Cannot filter decisive bars.")
+        # If target is critical and missing, returning empty might be best
+        return pd.DataFrame()
+
+    if feats.empty:
+        print("Warning: Dataset is empty after all processing steps.")
+
+    print("Dataset generation complete.")
     return feats
 
 # ------------------- regime split helper --------------------------------------
@@ -1131,110 +1119,166 @@ def main():
     args = p.parse_args()
 
     if args.run_example:
-        print("Running integrated usage example...")
+        print("Running integrated usage example as per issue specification...")
         try:
-            # Ensure yf is available (should be imported as yf)
-            if 'yf' not in globals(): print("Error: yfinance (yf) not imported."); return
+            # Ensure necessary modules like yf, engineer, orderflow_features, etc. are available globally.
+            # Imports like numpy (np), pandas (pd) should be at the top of the script.
+            import numpy as np
+            import pandas as pd
+            import yfinance as yf
+            # Ensure other model specific imports like xgb, LGBMClassifier, torch, LogisticRegression are available globally.
 
-            print("Downloading SPXL data for example (2024-01-01 onwards, 5m interval)...")
-            # Using a slightly shorter period for quicker example run if needed, e.g., last 60-90 days
-            # For consistency with issue, using 2024-01-01. If too long, adjust START_DATE_EXAMPLE
-            START_DATE_EXAMPLE = "2024-01-01"
-            # END_DATE_EXAMPLE = dt.date.today().isoformat() # Or a fixed recent date for consistency
-            # To avoid issues if today is too close to start_date for enough data:
-            end_date_obj = dt.datetime.strptime(START_DATE_EXAMPLE, '%Y-%m-%d') + dt.timedelta(days=90)
-            END_DATE_EXAMPLE = end_date_obj.isoformat()
-            print(f'Example data range: {START_DATE_EXAMPLE} to {END_DATE_EXAMPLE}')
+            print("Downloading SPXL data (start='2024-01-01', interval='5m')...")
+            # For the example, use a more restricted date range to speed up if necessary,
+            # but stick to "2024-01-01" as per issue.
+            # Ensure end_date allows for sufficient data. Let's use a fixed 90-day period for the example.
+            start_date_example = "2024-01-01"
+            try:
+                end_date_example = (pd.to_datetime(start_date_example) + pd.Timedelta(days=90)).strftime('%Y-%m-%d')
+                # Ensure end_date is not in the future, cap at today if it is.
+                today_str = pd.Timestamp.now().strftime('%Y-%m-%d')
+                if end_date_example > today_str:
+                    end_date_example = today_str
+            except Exception: # Fallback if date parsing fails
+                end_date_example = (dt.date.today()).isoformat()
 
-            raw_df = yf.download("SPXL", start=START_DATE_EXAMPLE, end=END_DATE_EXAMPLE, interval="5m", progress=False)
+
+            if pd.to_datetime(start_date_example) >= pd.to_datetime(end_date_example):
+                print(f"Example Error: Start date {start_date_example} is on or after end date {end_date_example}. Adjusting end date.")
+                # Adjust end_date to be at least a bit after start_date, e.g. start_date + 30 days, capped by today
+                end_date_example = (pd.to_datetime(start_date_example) + pd.Timedelta(days=30)).strftime('%Y-%m-%d')
+                if end_date_example > today_str: end_date_example = today_str
+                if pd.to_datetime(start_date_example) >= pd.to_datetime(end_date_example): # If still problematic
+                     print("Example Error: Could not set a valid date range. Aborting example.")
+                     return
+
+
+            print(f"Example data download range: {start_date_example} to {end_date_example}")
+            raw_df = yf.download("SPXL", start=start_date_example, end=end_date_example, interval="5m", progress=False)
+
             if raw_df.empty:
-                print("Example Error: No data downloaded for SPXL.")
+                print("Example Error: No data downloaded for SPXL. Check ticker and date range.")
                 return
-            if raw_df.index.tz is not None: raw_df = raw_df.tz_localize(None)
-            print(f"Raw data shape: {raw_df.shape}")
+            if raw_df.index.tz is not None: raw_df = raw_df.tz_localize(None) # Remove timezone if present
+            print(f"Raw SPXL data downloaded. Shape: {raw_df.shape}")
 
             # Feature pipeline
-            print("Running engineer()...")
-            feats_example = engineer(raw_df) # engineer() is an existing function
-            print(f"Shape after engineer(): {feats_example.shape}")
+            print("1. Running engineer(raw_df)...")
+            feats_example = engineer(raw_df) # engineer() is an existing function in the script
+            if feats_example.empty:
+                print("Example Error: DataFrame empty after engineer().")
+                return
+            print(f"   Shape after engineer(): {feats_example.shape}")
 
-            if 'orderflow_features' in globals() and callable(globals()['orderflow_features']):
-                print("Running orderflow_features()...")
-                feats_example = orderflow_features(feats_example)
-                print(f"Shape after orderflow_features(): {feats_example.shape}")
-            else: print("Skipping orderflow_features (not found). Example will be incomplete.")
+            print("2. Running orderflow_features(feats_example)...")
+            feats_example = orderflow_features(feats_example) # Newly integrated
+            if feats_example.empty:
+                print("Example Error: DataFrame empty after orderflow_features().")
+                return
+            print(f"   Shape after orderflow_features(): {feats_example.shape}")
 
-            if 'triple_barrier_labels' in globals() and callable(globals()['triple_barrier_labels']):
-                import inspect
-                try:
-                    sig = inspect.signature(globals()['triple_barrier_labels'])
-                    if 'max_hold' in sig.parameters: # Check if it's the new one
-                        print("Running new triple_barrier_labels()...")
-                        feats_example["target"] = triple_barrier_labels(feats_example)
-                        print(f"Shape after triple_barrier_labels(): {feats_example.shape}")
-                    else: raise ValueError("Not the new TBL function (missing max_hold param).")
-                except Exception as e_tbl_check:
-                    print(f"Skipping new triple_barrier_labels ({e_tbl_check}). Example will be incomplete or use fallback.")
-                    if '_old_triple_barrier_labels' in globals() and callable(globals()['_old_triple_barrier_labels']):
-                        print("Using _old_triple_barrier_labels as fallback for example...")
-                        feats_example["target"] = _old_triple_barrier_labels(feats_example)
-                    elif 'label_reversals' in globals() and callable(globals()['label_reversals']):
-                        print("Using label_reversals as ultimate fallback for example...")
-                        feats_example = label_reversals(feats_example) # Creates 'target'
-                    else: print("No suitable labeling function found for example.")
-            else: print("Skipping triple_barrier_labels (not found). Example will be incomplete.")
+            print("3. Running triple_barrier_labels(feats_example) to generate 'target'...")
+            feats_example["target"] = triple_barrier_labels(feats_example) # Newly integrated
+            if "target" not in feats_example.columns:
+                print("Example Error: 'target' column not created by triple_barrier_labels().")
+                return
+            print(f"   Shape after triple_barrier_labels(): {feats_example.shape}")
 
-            if feats_example.empty or 'target' not in feats_example.columns:
-                print("Example Error: Feature DataFrame is empty or 'target' is missing after pipeline.")
+            # Drop rows with NaN in target or features used by models, if any were introduced and not handled
+            # train_ensemble expects numpy arrays, so NaNs can cause issues.
+            # First, identify potential feature columns (all except 'target' initially)
+            potential_feature_cols = [c for c in feats_example.columns if c not in ("target",)]
+            # Check for NaNs in these feature columns and the target column
+            cols_to_check_for_nan = potential_feature_cols + ["target"]
+            nan_rows_mask = feats_example[cols_to_check_for_nan].isnull().any(axis=1)
+            if nan_rows_mask.any():
+                print(f"   Found {nan_rows_mask.sum()} rows with NaNs in features/target. Removing them.")
+                feats_example.dropna(subset=cols_to_check_for_nan, inplace=True)
+                print(f"   Shape after NaN removal: {feats_example.shape}")
+
+            if feats_example.empty:
+                print("Example Error: DataFrame is empty after NaN removal. Cannot proceed.")
                 return
 
-            # Split
-            all_cols_example = [c for c in feats_example.columns if c not in ("target",)]
-            X_example = feats_example[all_cols_example].values
-            y_example = (feats_example["target"] == 1).astype(int).values
-            print(f"X_example shape: {X_example.shape}, y_example shape: {y_example.shape}")
+            # Split data
+            print("4. Splitting data into X and y...")
+            # feature_cols for train_ensemble should be determined *before* converting to numpy arrays
+            # if train_ensemble's feature_cols parameter is to be used meaningfully with a DataFrame.
+            # However, the new train_ensemble expects X to be a numpy array already, and feature_cols
+            # is more for reference or if X were a DataFrame passed to it.
+            # For this example, we'll pass the list of column names.
+            all_cols_for_X = [c for c in feats_example.columns if c not in ("target",)]
 
-            if len(X_example) < 20: # Min data for split and train_ensemble
-                print(f"Example Error: Not enough data after processing ({len(X_example)} samples) for training example.")
+            X_example_np = feats_example[all_cols_for_X].values
+            y_example_np = (feats_example["target"] == 1).astype(int).values # Target is +1 class
+            print(f"   X_example (NumPy) shape: {X_example_np.shape}, y_example (NumPy) shape: {y_example_np.shape}")
+
+            min_data_for_split_train = 20 # Minimum for any operations
+            # train_ensemble internally needs seq_len for Stockformer, and then some for training.
+            # Let's say seq_len (12) + a few samples for training (e.g., 10) for train set,
+            # and seq_len + a few for val set. So roughly 2* (12+10) = 44 samples.
+            # Let's use a higher threshold for the example to be safe.
+            min_samples_for_example = 50 # Adjusted to ensure enough data for seq_len logic
+            if len(X_example_np) < min_samples_for_example:
+                print(f"Example Error: Not enough data ({len(X_example_np)} samples) after processing for a meaningful train/val split and ensemble training (need ~{min_samples_for_example}).")
                 return
 
-            split_idx_example = int(len(X_example) * 0.8)
-            X_train_ex, X_val_ex = X_example[:split_idx_example], X_example[split_idx_example:]
-            y_train_ex, y_val_ex = y_example[:split_idx_example], y_example[split_idx_example:]
-            print(f"X_train_ex: {X_train_ex.shape}, X_val_ex: {X_val_ex.shape}")
+            split_idx_example = int(len(X_example_np) * 0.8)
+            X_train_ex, X_val_ex = X_example_np[:split_idx_example], X_example_np[split_idx_example:]
+            y_train_ex, y_val_ex = y_example_np[:split_idx_example], y_example_np[split_idx_example:]
+            print(f"   X_train_ex shape: {X_train_ex.shape}, y_train_ex shape: {y_train_ex.shape}")
+            print(f"   X_val_ex shape: {X_val_ex.shape},   y_val_ex shape: {y_val_ex.shape}")
 
-            example_models = None
-            if 'train_ensemble' in globals() and callable(globals()['train_ensemble']):
-                print("Running train_ensemble() for example...")
-                try:
-                    example_models = train_ensemble(X_train_ex, y_train_ex, X_val_ex, y_val_ex,
-                                                 seq_len=12, feature_cols=all_cols_example)
-                    print("train_ensemble() completed for example.")
-                except Exception as e_train_ex:
-                    print(f"Error during example train_ensemble: {e_train_ex}")
-            else: print("Skipping train_ensemble (not found). Example cannot complete training/prediction part.")
+            # Train ensemble
+            example_models_bundle = None
+            seq_len_example = 12 # As per issue's usage example for train_ensemble
 
-            if example_models and 'stacked_predict' in globals() and callable(globals()['stacked_predict']):
-                if len(X_val_ex) >= example_models.get('seq_len', 12): # Use X_val_ex for prediction example
-                    print("Running stacked_predict() for example...")
-                    # Predict on the first part of X_val_ex that has enough history
-                    # For this example, let's take last seq_len from X_train_ex to predict first of X_val_ex or use X_val_ex itself
-                    # The issue example uses X[-12:], which means last 12 of entire X.
-                    # Let's use last seq_len of X_example for simplicity of demo here.
-                    seq_len_ex = example_models.get('seq_len', 12)
-                    if len(X_example) >= seq_len_ex:
-                       prob_now_example = stacked_predict(example_models, X_example[-seq_len_ex:])
-                       print(f"Example ensemble reversal probability (on last {seq_len_ex} samples of data): {prob_now_example:.4f}")
-                    else: print(f"Not enough data in X_example for stacked_predict with seq_len {seq_len_ex}")
-                else: print("Not enough validation data for stacked_predict example or seq_len missing in bundle.")
-            elif example_models: print("Skipping stacked_predict (not found). Example cannot complete prediction part.")
-            else: print("Skipping stacked_predict as models were not trained.")
+            # Check if X_train_ex and X_val_ex are sufficient for seq_len operations
+            # train_ensemble's make_tensor needs len(X) > seq_len
+            if len(X_train_ex) <= seq_len_example or len(X_val_ex) <= seq_len_example:
+                 print(f"Example Error: Training data (len {len(X_train_ex)}) or validation data (len {len(X_val_ex)}) is not long enough for seq_len {seq_len_example}.")
+                 return
 
-        except Exception as e_example:
-            print(f"An error occurred during --run_example: {e_example}")
-        print("Usage example finished.")
+            print(f"5. Calling train_ensemble(X_train_ex, y_train_ex, X_val_ex, y_val_ex, seq_len={seq_len_example}, feature_cols=all_cols_for_X)...")
+            try:
+                example_models_bundle = train_ensemble(X_train_ex, y_train_ex, X_val_ex, y_val_ex,
+                                                       seq_len=seq_len_example, feature_cols=all_cols_for_X)
+                print("   train_ensemble() completed for example.")
+                if not example_models_bundle or not example_models_bundle.get("meta"):
+                    print("   Warning: train_ensemble did not return a complete model bundle or meta-learner is missing.")
+            except Exception as e_train_ex:
+                print(f"   Example Error during train_ensemble: {e_train_ex}")
+                # import traceback
+                # traceback.print_exc() # For more detailed error during subtask execution if needed
+                return # Stop if training fails
+
+            # Live prediction example
+            if example_models_bundle and example_models_bundle.get("meta"): # Check if meta learner exists
+                # The issue example uses `X[-12:]`. Here, X is `X_example_np`.
+                if len(X_example_np) >= seq_len_example:
+                    X_latest_for_predict = X_example_np[-seq_len_example:] # Last seq_len rows of the whole dataset
+                    print(f"6. Calling stacked_predict(example_models_bundle, X_latest_for_predict)...")
+                    try:
+                        prob_now_example = stacked_predict(example_models_bundle, X_latest_for_predict)
+                        print(f"   >>> Example ensemble reversal probability (on last {seq_len_example} samples of data): {prob_now_example:.4f}")
+                    except Exception as e_predict_ex:
+                        print(f"   Example Error during stacked_predict: {e_predict_ex}")
+                        # import traceback
+                        # traceback.print_exc()
+                else:
+                    print(f"   Example Warning: Not enough data in X_example_np (len {len(X_example_np)}) for stacked_predict with seq_len {seq_len_example}.")
+            elif example_models_bundle:
+                 print("   Example Info: Meta-learner is missing from bundle. Skipping stacked_predict().")
+            else:
+                print("   Example Info: Model training failed or produced no bundle. Skipping stacked_predict().")
+
+        except Exception as e_example_main:
+            print(f"An unexpected error occurred during --run_example: {e_example_main}")
+            # import traceback
+            # traceback.print_exc()
+        finally:
+            print("Usage example finished.")
         return # Exit main after example runs
-
     elif args.train or not os.path.exists(MODEL_PATH):
         print("Preparing dataset for ensemble training...")
         feats_df = dataset() # Call the modified dataset function
