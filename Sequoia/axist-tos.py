@@ -41,12 +41,13 @@ warnings.filterwarnings(
 )
 
 PREDICTIONS_FILE = "weekly_signals.json"
-DATA_CACHE: dict[tuple, tuple] = {}      # key → (df_5m, df_30m, df_1h, df_2h, df_1d)
+DATA_CACHE: dict[tuple, tuple] = {}      # key → (df_5m, df_30m, df_1h, df_2h, df_4h, df_1d)
 ALPACA_API_CLIENT = None
 
 ALPACA_TIMEFRAME_MAP = {
     '1m': TimeFrame.Minute1, '5m': TimeFrame.Minute5, '15m': TimeFrame.Minute15,
     '30m': TimeFrame.Minute30, '1h': TimeFrame.Hour1, '2h': TimeFrame.Hour2, # Added '2h'
+    '4h': TimeFrame.Hour4, # Added '4h'
     '1d': TimeFrame.Day
 }
 
@@ -171,6 +172,7 @@ def fetch_data(ticker,start=None,end=None,intervals=None,warmup_days=300):
         intervals={
             '5m':('14d','5m'), '30m':('60d','30m'), '1h':('120d','1h'),
             '2h':('120d','2h'), # Changed to fetch 2h data directly
+            '4h':('240d','4h'), # Added 4h
             '1d':('380d','1d')
         }
     dfs,eval_time_utc={},datetime.datetime.now(datetime.timezone.utc)
@@ -186,7 +188,7 @@ def fetch_data(ticker,start=None,end=None,intervals=None,warmup_days=300):
         df=_alpaca_download_cached(ticker,alpaca_tf_for_fetch,start_iso,end_iso)
         dfs[key]=df # Assign directly, no special resampling for '2h' here
 
-    return (dfs.get(k,pd.DataFrame()) for k in ['5m','30m','1h','2h','1d'])
+    return (dfs.get(k,pd.DataFrame()) for k in ['5m','30m','1h','2h','4h','1d'])
 
 def compute_indicators(df:pd.DataFrame,timeframe:str="daily")->pd.DataFrame:
     df=df.copy(); req={"Open","High","Low","Close","Volume"}
@@ -212,15 +214,17 @@ def to_daily(intra_df,label):
     if intra_df.empty: return pd.DataFrame()
     daily_data=intra_df.groupby(intra_df.index.date).tail(1); daily_data.index=pd.to_datetime(daily_data.index.date); daily_data.index.name='Date'; return daily_data
 
-def prepare_features(df_5m:pd.DataFrame,df_30m:pd.DataFrame,df_1h:pd.DataFrame,df_2h:pd.DataFrame,df_1d:pd.DataFrame,*,horizon:int=10,drop_recent:bool=True)->pd.DataFrame:
-    inds=[compute_indicators(df.copy(),lbl) for df,lbl in zip([df_5m,df_30m,df_1h,df_2h,df_1d],['5m','30m','hourly','2h','daily'])]
+def prepare_features(df_5m:pd.DataFrame,df_30m:pd.DataFrame,df_1h:pd.DataFrame,df_2h:pd.DataFrame,df_4h:pd.DataFrame,df_1d:pd.DataFrame,*,horizon:int=10,drop_recent:bool=True)->pd.DataFrame:
+    inds=[compute_indicators(df.copy(),lbl) for df,lbl in zip([df_5m,df_30m,df_1h,df_2h,df_4h,df_1d],['5m','30m','hourly','2h','4h','daily'])]
     inds[0]['AnchoredVWAP_5m']=compute_anchored_vwap(inds[0],2000)
     inds[1]['AnchoredVWAP_30m']=compute_anchored_vwap(inds[1],200)
     inds[2]['AnchoredVWAP_1h']=compute_anchored_vwap(inds[2],120)
-    ind_1d=inds[4]; ind_1d['AnchoredVWAP']=compute_anchored_vwap(ind_1d,252)
-    dailies=[to_daily(i,lbl) for i,lbl in zip(inds[:-1],['5m','30m','hourly','2h'])]
+    # inds[3] is df_2h, VWAP not typically calculated or used from example
+    inds[4]['AnchoredVWAP_4h']=compute_anchored_vwap(inds[4],240) # Added for 4h
+    ind_1d=inds[5]; ind_1d['AnchoredVWAP']=compute_anchored_vwap(ind_1d,252) # Index adjusted from 4 to 5
+    dailies=[to_daily(i,lbl) for i,lbl in zip(inds[:-1],['5m','30m','hourly','2h','4h'])] # Added '4h'
     features_df=ind_1d
-    for daily_df, suffix in zip(dailies, ['_5m', '_30m', '_1h', '_2h']):
+    for daily_df, suffix in zip(dailies, ['_5m', '_30m', '_1h', '_2h', '_4h']): # Added '_4h'
         features_df = features_df.join(daily_df, rsuffix=suffix)
     features_df.dropna(subset=['Close'],inplace=True)
     if features_df.empty: return features_df
@@ -290,7 +294,7 @@ def _summarise_performance(trades_df, total_days):
     return summary
 
 def backtest_strategy(t,sd,ed,lf=None):
-    d5,d30,d1h,d90,d1d=fetch_data(t,start=sd,end=ed); ft=prepare_features(d5,d30,d1h,d90,d1d); ft=refine_features(ft); m,thr=tune_threshold_and_train(ft)
+    d5,d30,d1h,df_2h,df_4h,d1d=fetch_data(t,start=sd,end=ed); ft=prepare_features(d5,d30,d1h,df_2h,df_4h,d1d); ft=refine_features(ft); m,thr=tune_threshold_and_train(ft)
     if m is None: print(Fore.YELLOW+f"Model fail {t}."+Style.RESET_ALL); return
     Xa,prds,pbs=ft.drop(columns=['future_class']).ffill().bfill(),None,None; prds,pbs=m.predict(Xa),m.predict_proba(Xa)
     dp=ft.copy(); dp['prediction']=prds; trds,ip,di,ep,sp,tp,ets=[],False,None,None,None,None,None
@@ -356,9 +360,9 @@ def run_signals_on_watchlists(use_intraday:bool=True):
         print(f"\n========== {side.upper()} WATCH-LIST ==========")
         want_dir="LONG" if side=="long" else "SHORT"
         for ticker in tickers:
-            try: d5,d30,d1h,d90,d1d=get_or_fetch(ticker)
+            try: d5,d30,d1h,df_2h,df_4h,d1d=get_or_fetch(ticker)
             except Exception as e: print(f"{ticker}: data error → {e}"); continue
-            feats=(prepare_features_intraday(d30) if use_intraday else prepare_features(d5,d30,d1h,d90,d1d))
+            feats=(prepare_features_intraday(d30) if use_intraday else prepare_features(d5,d30,d1h,df_2h,df_4h,d1d))
             feats=refine_features(feats)
             if feats.empty or 'future_class' not in feats.columns: print(f"{ticker}: no usable rows."); continue
             model,thr=tune_threshold_and_train(feats)
@@ -368,7 +372,7 @@ def run_signals_on_watchlists(use_intraday:bool=True):
 
 def show_signals_since_start_of_week()->None:
     all_syms=load_watchlist("long")+load_watchlist("short")
-    for p,i in [("14d","5m"),("60d","30m"),("120d","1h"),("60d","2h"),("380d","1d")]: preload_alpaca_interval_cache(all_syms,p,i) # Changed 2h to 2h
+    for p,i in [("14d","5m"),("60d","30m"),("120d","1h"),("120d","2h"),("240d","4h"),("380d","1d")]: preload_alpaca_interval_cache(all_syms,p,i) # Updated 2h period, Added 4h
     today,monday=datetime.datetime.today().replace(hour=0,minute=0,second=0,microsecond=0),datetime.datetime.today()-datetime.timedelta(days=datetime.datetime.today().weekday())
     start_s,end_s=(monday-datetime.timedelta(days=180)).strftime("%Y-%m-%d"),today.strftime("%Y-%m-%d")
     cache,open_by_symbol=load_predictions(),{p["symbol"]:p for p in load_predictions() if p["status"]=="Open"}
@@ -379,11 +383,11 @@ def show_signals_since_start_of_week()->None:
         want_dir="LONG" if side=="long" else "SHORT"
         for ticker in tickers:
             print(f"\n--- {ticker} ---")
-            try: d5,d30,d1h,d90,d1d=get_or_fetch(ticker) # d90 will now be 2h data
+            try: d5,d30,d1h,df_2h,df_4h,d1d=get_or_fetch(ticker) # df_2h was d90, now 2h data
             except Exception as e: print(f"Fetch error {e}"); continue
             if d1d.empty: print(f"No daily data for {ticker}."); continue
             d1d_s=d1d.loc[start_s:end_s] if not d1d.loc[start_s:end_s].empty else d1d
-            feats_all=prepare_features(d5,d30,d1h,d90,d1d_s,drop_recent=False) # d90 is 2h
+            feats_all=prepare_features(d5,d30,d1h,df_2h,df_4h,d1d_s,drop_recent=False) # df_2h was d90, is 2h
             if feats_all.empty: print("No data for features."); continue
             train_df=refine_features(feats_all.dropna(subset=["future_class"]))
             if train_df.empty: print("No labels for training."); continue
@@ -506,8 +510,8 @@ def run_signals_for_watchlist(side:str,use_intraday:bool=True):
     if not tickers: print(f"{side.capitalize()} watch-list empty."); return
     for ticker in tickers:
         print(f"\n=== {ticker} ({side}) ===")
-        d5,d30,d1h,d90,d1d=get_or_fetch(ticker)
-        feats=(prepare_features_intraday(d30) if use_intraday else prepare_features(d5,d30,d1h,d90,d1d))
+        d5,d30,d1h,df_2h,df_4h,d1d=get_or_fetch(ticker)
+        feats=(prepare_features_intraday(d30) if use_intraday else prepare_features(d5,d30,d1h,df_2h,df_4h,d1d))
         feats=refine_features(feats)
         if feats.empty or 'future_class' not in feats.columns: print("No valid data."); continue
         model,thr=tune_threshold_and_train(feats)
@@ -547,6 +551,7 @@ def main():
         preload_alpaca_interval_cache(ts,"60d","30m"); preload_alpaca_interval_cache(ts,"380d","1d") # Preload for 30m and 1d
         # Also preload for 2h if it's going to be used by '2h' key via intervals in fetch_data
         preload_alpaca_interval_cache(ts,"120d","2h")
+        preload_alpaca_interval_cache(ts,"240d","4h") # Added for 4h
 
 
         for t in ts:
@@ -559,17 +564,17 @@ def main():
         print(f"\n=== Processing {t} (live{' intraday' if uil else ''}) ===")
         try:
             fetched_data = get_or_fetch(t)
-            if isinstance(fetched_data, tuple) and len(fetched_data) == 5:
-                d5,d30,d1h,d90,d1d = fetched_data
+            if isinstance(fetched_data, tuple) and len(fetched_data) == 6:
+                d5,d30,d1h,df_2h,df_4h,d1d = fetched_data
             else:
-                print(f"Data fetch error for {t}: get_or_fetch did not return 5 DataFrames."); continue
+                print(f"Data fetch error for {t}: get_or_fetch did not return 6 DataFrames."); continue
         except Exception as e: print(f"Data fetch error {t}: {e}"); continue
         fts=None
         if uil:
             if not d30.empty: fts=prepare_features_intraday(d30)
             else: print(f"No 30m data {t} live intraday."); continue
         else:
-            if not d1d.empty: fts=prepare_features(d5,d30,d1h,d90,d1d) # d90 is 2h data here
+            if not d1d.empty: fts=prepare_features(d5,d30,d1h,df_2h,df_4h,d1d) # df_2h was d90, is 2h data here
             else: print(f"No daily data {t} live daily."); continue
         if fts.empty: print(f"Insufficient data for features: {t}"); continue
         fts=refine_features(fts)
