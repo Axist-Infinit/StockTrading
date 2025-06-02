@@ -5,12 +5,15 @@ import os
 import sys
 import argparse
 import datetime
+from datetime import timedelta
 import json
 import joblib, pandas as pd
 import numpy as np
-import yfinance as yf
+# import yfinance as yf # Removed
 import urwid
 from pathlib import Path
+import alpaca_trade_api
+from alpaca_trade_api.rest import TimeFrame
 
 from watchlist_utils import load_watchlist, save_watchlist, manage_watchlist
 from ta.momentum import RSIIndicator, StochasticOscillator
@@ -26,7 +29,7 @@ from ta.volume import MFIIndicator  # optional if you want more volume-based fea
 from ta.volatility import DonchianChannel  # optional, if needed
 from colorama import init, Fore, Style
 init(autoreset=True)
-from fredapi import Fred 
+from fredapi import Fred
 
 import configparser
 import warnings
@@ -38,18 +41,27 @@ warnings.filterwarnings(
 )
 
 PREDICTIONS_FILE = "weekly_signals.json"
-YF_CALLS = 0          # total HTTPS requests sent to Yahoo Finance
 DATA_CACHE: dict[tuple, tuple] = {}      # key → (df_5m, df_30m, df_1h, df_90m, df_1d)
+ALPACA_API_CLIENT = None
+
+ALPACA_TIMEFRAME_MAP = {
+    '1m': TimeFrame.Minute1, '5m': TimeFrame.Minute5, '15m': TimeFrame.Minute15,
+    '30m': TimeFrame.Minute30, '1h': TimeFrame.Hour1, '2h': TimeFrame.Hour2, # Added '2h'
+    '1d': TimeFrame.Day
+}
+
+def get_start_end_dates_for_period(period_str, end_date_dt=None):
+    if end_date_dt is None:
+        end_date_dt = datetime.datetime.now(datetime.timezone.utc)
+    num = int(period_str[:-1])
+    unit = period_str[-1].lower()
+    if unit == 'd': start_date_dt = end_date_dt - timedelta(days=num)
+    elif unit == 'mo': start_date_dt = end_date_dt - timedelta(days=num * 30)
+    elif unit == 'y': start_date_dt = end_date_dt - timedelta(days=num * 365)
+    else: start_date_dt = end_date_dt - timedelta(days=num)
+    return start_date_dt, end_date_dt
 
 def get_or_fetch(ticker: str, start=None, end=None):
-    """
-    Return the tuple from ``fetch_data`` but avoid duplicate calls
-    within the *same* run.
-
-    Usage
-    -----
-    df_5m, df_30m, df_1h, df_90m, df_1d = get_or_fetch(sym, start, end)
-    """
     key = (ticker, start, end)
     if key not in DATA_CACHE:
         DATA_CACHE[key] = fetch_data(ticker, start=start, end=end)
@@ -60,1394 +72,517 @@ def load_config():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     config_path = os.path.join(script_dir, "config.ini")
     config.read(config_path)
+    fred_api_key = config['FRED'].get('api_key', None)
+    alpaca_api_key, alpaca_secret_key, alpaca_base_url = None, None, None
+    if 'ALPACA' in config:
+        alpaca_api_key = config['ALPACA'].get('api_key', None)
+        alpaca_secret_key = config['ALPACA'].get('secret_key', None)
+        alpaca_base_url = config['ALPACA'].get('base_url', 'https://paper-api.alpaca.markets')
+    return fred_api_key, alpaca_api_key, alpaca_secret_key, alpaca_base_url
 
-    return config['FRED'].get('api_key', None)
+def initialize_alpaca_client(api_key, secret_key, base_url):
+    global ALPACA_API_CLIENT
+    if not api_key or not secret_key or not base_url:
+        print(Fore.YELLOW + "Alpaca API credentials incomplete. Cannot initialize client." + Style.RESET_ALL)
+        ALPACA_API_CLIENT = None; return
+    try:
+        api = alpaca_trade_api.REST(key_id=api_key, secret_key=secret_key, base_url=base_url, api_version='v2')
+        account = api.get_account()
+        print(Fore.GREEN + "Successfully connected to Alpaca API." + Style.RESET_ALL)
+        ALPACA_API_CLIENT = api
+    except Exception as e:
+        print(Fore.RED + f"Failed to connect to Alpaca API: {e}" + Style.RESET_ALL)
+        ALPACA_API_CLIENT = None
 
 def load_predictions():
-    """Return cached predictions; add default keys for older records."""
-    if not os.path.isfile(PREDICTIONS_FILE):
-        return []
+    if not os.path.isfile(PREDICTIONS_FILE): return []
     try:
-        with open(PREDICTIONS_FILE, "r") as fh:
-            data = json.load(fh)
-    except Exception:
-        return []
-
+        with open(PREDICTIONS_FILE, "r") as fh: data = json.load(fh)
+    except Exception: return []
     for rec in data:
         rec.setdefault("status", "Open")
-        rec.setdefault("entry_date",
-                       datetime.datetime.today().strftime("%Y-%m-%d"))
+        rec.setdefault("entry_date", datetime.datetime.today().strftime("%Y-%m-%d"))
     return data
 
 def save_predictions(pred_list):
-    """Overwrite the cache with *pred_list*."""
-    with open(PREDICTIONS_FILE, "w") as fh:
-        json.dump(pred_list, fh, indent=2)
-
-#warnings.filterwarnings("ignore")
+    with open(PREDICTIONS_FILE, "w") as fh: json.dump(pred_list, fh, indent=2)
 
 def _update_positions_status() -> None:
-
-    preds = load_predictions()
-    open_pos = [p for p in preds if p.get("status") == "Open"]
-    if not open_pos:
-        return
-
-    symbols = sorted({p["symbol"] for p in open_pos})
-
-    try:
-        last_close = (
-            yf.download(symbols, period="1d", auto_adjust=True,
-                        progress=False, threads=False)["Close"]
-        )
-    except Exception:
-        # fallback – no update but avoid a crash
-        last_close = pd.Series(
-            {p["symbol"]: p["entry_price"] for p in open_pos},
-            name="Close"
-        )
-
-    if isinstance(last_close, pd.Series):
-        price_map = last_close.to_dict()
-    else:                        # DataFrame ⇒ one row per symbol
-        if isinstance(last_close.columns, pd.MultiIndex):
-            last_close = last_close.droplevel(0, axis=1)
-        price_map = last_close.iloc[-1].to_dict()
-
-    today = datetime.date.today().isoformat()
-    changed = False
-
-    for rec in open_pos:
-        sym = rec["symbol"]
-        now_price = float(price_map.get(sym, rec["entry_price"]))
-
-        if rec["direction"] == "LONG":
-            hit_stop   = now_price <= rec["stop_loss"]
-            hit_target = now_price >= rec["profit_target"]
-        else:                                   # SHORT
-            hit_stop   = now_price >= rec["stop_loss"]
-            hit_target = now_price <= rec["profit_target"]
-
-        if hit_stop or hit_target:
-            rec["status"]     = "Stop" if hit_stop else "Target"
-            rec["exit_date"]  = today
-            rec["exit_price"] = round(now_price, 2)
-            changed = True
-
-    if changed:
-        save_predictions(preds)
-
-def safe_download(tickers, *args, **kwargs):
-    """
-    Wrapper around yf.download with exponential back-off **and** a
-    symbol-by-symbol fallback when the bulk call is still rate-limited.
-    """
-    import random
-    from yfinance.exceptions import YFRateLimitError
-
-    max_bulk_tries = 7                         # 7 → 2 min until last try
-    for attempt in range(max_bulk_tries):
-        try:
-            return yf.download(tickers, *args, **kwargs)
-        except YFRateLimitError:
-            wait = 2 ** attempt
-            print(f"⚠️  Yahoo bulk-call rate-limit ({tickers}) – wait {wait}s")
-            time.sleep(wait + random.uniform(0, 2))
-
-    # ----- bulk failed → try per-symbol one by one -----------------
-    if isinstance(tickers, (list, tuple, set)):
-        frames = {}
-        for sym in tickers:
-            for attempt in range(3):           # 3 tries per symbol
-                try:
-                    df = yf.download(sym, *args, **kwargs)
-                    frames[sym] = df
-                    break
-                except YFRateLimitError:
-                    time.sleep(1 + random.uniform(0, 2))
-        if frames:
-            return pd.concat(frames, axis=1)
-    raise YFRateLimitError("safe_download exhausted retries.")
-
-
-
-def _download_cached(ticker: str,
-                     period: str,
-                     interval: str,
-                     cache_dir: str = ".ohlcv_cache") -> pd.DataFrame:
-    """
-    Return a tz-naïve OHLCV frame, cached on disk.
-
-    • The cache is considered “fresh” until it is **48 bars** old on intraday
-      intervals (two trading days) or **6 bars** old on daily data.  
-      This drastically reduces the number of Yahoo calls.
-    """
-    Path(cache_dir).mkdir(exist_ok=True)
-    fname = Path(cache_dir) / f"{ticker}_{period}_{interval}.pkl"
-
-    seconds_per_bar = {"5m": 300, "30m": 1800, "1h": 3600,
-                       "90m": 5400, "1d": 86400}
-    factor  = 48 if interval != "1d" else 6
-    max_age = seconds_per_bar.get(interval, 3600) * factor
-
-    if fname.exists():
-        try:
-            cached: pd.DataFrame = joblib.load(fname)
-            if not cached.empty:
-                age = (pd.Timestamp.utcnow() - cached.index[-1]).total_seconds()
-                if age < max_age:
-                    return cached
-        except Exception:
-            fname.unlink(missing_ok=True)            # wipe corrupted file
-
-    fresh = safe_download(ticker, period=period, interval=interval,
-                          auto_adjust=True, progress=False, threads=False)
-
-    if isinstance(fresh.columns, pd.MultiIndex):
-        fresh.columns = fresh.columns.droplevel(1)
-    if "Adj Close" in fresh.columns and "Close" not in fresh.columns:
-        fresh.rename(columns={"Adj Close": "Close"}, inplace=True)
-
-    if fname.exists():
-        try:
-            old = joblib.load(fname)
-            fresh = (pd.concat([old, fresh])
-                       .sort_index()
-                       .drop_duplicates())
-        except Exception:
-            pass
-
-    if fresh.index.tz is not None:
-        fresh.index = fresh.index.tz_localize(None)
-
-    joblib.dump(fresh, fname)
-    return fresh
-
-
-def preload_interval_cache(symbols: list[str],
-                           period: str,
-                           interval: str,
-                           cache_dir: str = ".ohlcv_cache") -> None:
-    symbols = sorted(set(symbols))
-    if not symbols:
-        return
-
-    # one bulk call – threads=False keeps it to ONE HTTPS request
-    bulk = safe_download(symbols, period=period, interval=interval,
-                         auto_adjust=True, progress=False, threads=False)
-    if bulk.empty:
-        return
-
-    if isinstance(bulk.columns, pd.MultiIndex):
-        bulk = bulk.swaplevel(axis=1)          # → symbol 1st level
-        bulk.sort_index(axis=1, inplace=True)
-
-    Path(cache_dir).mkdir(exist_ok=True)
+    if ALPACA_API_CLIENT is None:
+        print(Fore.RED + "Alpaca API client not initialized. Cannot update positions status." + Style.RESET_ALL); return
+    preds = load_predictions(); open_pos = [p for p in preds if p.get("status") == "Open"]
+    if not open_pos: return
+    symbols = sorted({p["symbol"] for p in open_pos}); price_map = {}
+    if not symbols: return
+    print(f"Updating status for {len(symbols)} open positions using Alpaca...")
     for sym in symbols:
-        df = bulk[sym].dropna(how="all")
-        if df.empty:
-            continue
-        if df.index.tz is not None:
-            df.index = df.index.tz_localize(None)
-        joblib.dump(df,
-                    Path(cache_dir) / f"{sym}_{period}_{interval}.pkl")
+        try:
+            latest_trade = ALPACA_API_CLIENT.get_latest_trade(sym)
+            price_map[sym] = latest_trade.price
+        except Exception as e:
+            print(Fore.YELLOW + f"Could not fetch latest price for {sym} from Alpaca: {e}. Using entry price as fallback." + Style.RESET_ALL)
+            pos_for_fallback = next((p for p in open_pos if p["symbol"] == sym), None)
+            price_map[sym] = pos_for_fallback["entry_price"] if pos_for_fallback else 0
+    today = datetime.date.today().isoformat(); changed = False
+    for rec in open_pos:
+        sym = rec["symbol"]; now_price = float(price_map.get(sym, rec["entry_price"]))
+        if rec["direction"] == "LONG": hit_stop,hit_target = now_price<=rec["stop_loss"], now_price>=rec["profit_target"]
+        else: hit_stop,hit_target = now_price>=rec["stop_loss"], now_price<=rec["profit_target"]
+        if hit_stop or hit_target:
+            rec["status"]="Stop" if hit_stop else "Target"; rec["exit_date"]=today; rec["exit_price"]=round(now_price,2); changed=True
+    if changed: save_predictions(preds)
 
+def _alpaca_download_cached(ticker:str,timeframe:TimeFrame,start_iso:str,end_iso:str,cache_dir:str=".ohlcv_cache")->pd.DataFrame:
+    Path(cache_dir).mkdir(exist_ok=True)
+    fname=Path(cache_dir)/f"{ticker}_alpaca_{timeframe.value}_{start_iso.split('T')[0]}_{end_iso.split('T')[0]}.pkl"
+    max_age_seconds = (6*24*3600) if timeframe==TimeFrame.Day else (4*3600)
+    if fname.exists():
+        try:
+            cached_df:pd.DataFrame=joblib.load(fname)
+            if not cached_df.empty:
+                last_ts_utc=(pd.Timestamp(cached_df.index[-1],tz='America/New_York') if cached_df.index[-1].tzinfo is None else cached_df.index[-1]).tz_convert('UTC')
+                if (pd.Timestamp.utcnow()-last_ts_utc).total_seconds()<max_age_seconds: return cached_df.copy()
+        except Exception: fname.unlink(missing_ok=True)
+    if ALPACA_API_CLIENT is None: print(Fore.RED+f"Alpaca client NA for {ticker}."+Style.RESET_ALL); return pd.DataFrame()
+    try:
+        bars_df=ALPACA_API_CLIENT.get_bars(symbol_or_symbols=ticker,timeframe=timeframe,start=start_iso,end=end_iso,adjustment='split').df
+        if isinstance(bars_df.index,pd.MultiIndex) and 'symbol' in bars_df.index.names:
+            bars_df = bars_df.loc[ticker] if ticker in bars_df.index.get_level_values('symbol') else pd.DataFrame()
+        if bars_df.empty: return pd.DataFrame()
+        bars_df.rename(columns={'open':'Open','high':'High','low':'Low','close':'Close','volume':'Volume'},inplace=True)
+        for col in ['Open','High','Low','Close','Volume']:
+            if col not in bars_df: bars_df[col]=np.nan
+        bars_df.index=(bars_df.index.tz_localize('UTC') if bars_df.index.tz is None else bars_df.index).tz_convert('America/New_York').tz_localize(None)
+        bars_df=bars_df[['Open','High','Low','Close','Volume']].sort_index()
+        joblib.dump(bars_df,fname); return bars_df.copy()
+    except Exception as e: print(Fore.RED+f"Alpaca fetch error {ticker} {timeframe.value}: {e}"+Style.RESET_ALL); return pd.DataFrame()
 
-def fetch_data(ticker, start=None, end=None, intervals=None, warmup_days=300):
-    """
-    Returns (df_5m, df_30m, df_1h, df_90m, df_1d) — all tz-naïve.
-    Every Yahoo request now goes through safe_download (with back-off).
-    """
+def preload_alpaca_interval_cache(symbols:list[str],period:str,interval:str,cache_dir:str=".ohlcv_cache")->None:
+    symbols=sorted(set(symbols))
+    if not symbols or ALPACA_API_CLIENT is None: return
+    alpaca_tf=ALPACA_TIMEFRAME_MAP.get(interval)
+    if not alpaca_tf: print(Fore.YELLOW+f"Unsupported interval {interval} for preload."+Style.RESET_ALL); return
+    start_dt,end_dt=get_start_end_dates_for_period(period,datetime.datetime.now(datetime.timezone.utc))
+    start_iso,end_iso=(start_dt.replace(tzinfo=datetime.timezone.utc) if start_dt.tzinfo is None else start_dt).isoformat(), (end_dt.replace(tzinfo=datetime.timezone.utc) if end_dt.tzinfo is None else end_dt).isoformat()
+    for sym in symbols: _alpaca_download_cached(sym,alpaca_tf,start_iso,end_iso,cache_dir=cache_dir)
+
+def fetch_data(ticker,start=None,end=None,intervals=None,warmup_days=300):
     if intervals is None:
-        intervals = {
-            '5m':  ('14d',  '5m'),
-            '30m': ('60d',  '30m'),
-            '1h':  ('120d', '1h'),
-            '90m': ('60d',  '90m'),
-            '1d':  ('380d', '1d')
+        intervals={
+            '5m':('14d','5m'), '30m':('60d','30m'), '1h':('120d','1h'),
+            '90m':('120d','2h'), # Changed to fetch 2h data directly
+            '1d':('380d','1d')
         }
+    dfs,eval_time_utc={},datetime.datetime.now(datetime.timezone.utc)
+    for key,(period_str,interval_str) in intervals.items():
+        alpaca_tf_for_fetch = ALPACA_TIMEFRAME_MAP.get(interval_str) # Directly use interval_str from map
 
-    # intraday
-    df_5m  = _download_cached(ticker, *intervals['5m'])
-    df_30m = _download_cached(ticker, *intervals['30m'])
-    df_1h  = _download_cached(ticker, *intervals['1h'])
-    df_90m = _download_cached(ticker, *intervals['90m'])
+        if not alpaca_tf_for_fetch:
+            print(Fore.YELLOW+f"Unsupported interval {interval_str} for {key}."+Style.RESET_ALL); dfs[key]=pd.DataFrame(); continue
 
-    # daily
-    if start and end:
-        real_start = (pd.to_datetime(start) -
-                      datetime.timedelta(days=warmup_days)).strftime('%Y-%m-%d')
-        df_1d = safe_download(ticker, start=real_start, end=end,
-                              interval='1d', auto_adjust=True,
-                              progress=False, threads=False)
-    else:
-        df_1d = _download_cached(ticker, *intervals['1d'])
+        current_start_dt,current_end_dt=(pd.to_datetime(start)-timedelta(days=warmup_days), pd.to_datetime(end)) if key=='1d' and start and end else get_start_end_dates_for_period(period_str,eval_time_utc)
+        start_iso,end_iso=(current_start_dt.replace(tzinfo=datetime.timezone.utc) if current_start_dt.tzinfo is None else current_start_dt).isoformat(), (current_end_dt.replace(tzinfo=datetime.timezone.utc) if current_end_dt.tzinfo is None else current_end_dt).isoformat()
 
-    # ---------- clean helper ----------------------------------------
-    def _clean(df: pd.DataFrame) -> pd.DataFrame:
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.droplevel(1)
-        if 'Adj Close' in df.columns and 'Close' not in df.columns:
-            df.rename(columns={'Adj Close': 'Close'}, inplace=True)
-        df.dropna(how='all', inplace=True)
-        if hasattr(df.index, "tz") and df.index.tz is not None:
-            df.index = df.index.tz_localize(None)
-        return df
+        df=_alpaca_download_cached(ticker,alpaca_tf_for_fetch,start_iso,end_iso)
+        dfs[key]=df # Assign directly, no special resampling for '90m' here
 
-    return tuple(map(_clean, (df_5m, df_30m, df_1h, df_90m, df_1d)))
+    return (dfs.get(k,pd.DataFrame()) for k in ['5m','30m','1h','90m','1d'])
 
-def compute_indicators(df: pd.DataFrame, timeframe: str = "daily") -> pd.DataFrame:
-    """
-    Compute the core indicator set *plus* the exact “Sequoia” flags and
-    previous-day high/low needed for stop/target logic.
-    """
-    df = df.copy()                       # avoid SettingWithCopyWarning
-    req = {"Open", "High", "Low", "Close", "Volume"}
-    if df.empty or not req.issubset(df.columns):
-        return df
-
-    window = 14
-    # ===== standard indicators (unchanged) ==========================
-    rsi  = RSIIndicator(close=df["Close"], window=window).rsi()
-    adx  = ADXIndicator(high=df["High"], low=df["Low"], close=df["Close"], window=window)
-    stoch= StochasticOscillator(high=df["High"], low=df["Low"], close=df["Close"],
-                                window=window, smooth_window=3)
-    cci  = CCIIndicator(high=df["High"], low=df["Low"], close=df["Close"],
-                        window=20, constant=0.015)
-    macd = MACD(close=df["Close"], window_slow=26, window_fast=12, window_sign=9)
-    bb   = BollingerBands(close=df["Close"], window=20, window_dev=2)
-    atr  = AverageTrueRange(high=df["High"], low=df["Low"], close=df["Close"],
-                            window=window)
-
-    df[f"RSI_{timeframe}"]          = rsi
-    df[f"ADX_{timeframe}"]          = adx.adx()
-    df[f"ADX_pos_{timeframe}"]      = adx.adx_pos()
-    df[f"ADX_neg_{timeframe}"]      = adx.adx_neg()
-    df[f"STOCHk_{timeframe}"]       = stoch.stoch()
-    df[f"STOCHd_{timeframe}"]       = stoch.stoch_signal()
-    df[f"CCI_{timeframe}"]          = cci.cci()
-    df[f"MACD_{timeframe}"]         = macd.macd()
-    df[f"MACD_signal_{timeframe}"]  = macd.macd_signal()
-    df[f"MACD_hist_{timeframe}"]    = macd.macd_diff()
-    df[f"BB_upper_{timeframe}"]     = bb.bollinger_hband()
-    df[f"BB_lower_{timeframe}"]     = bb.bollinger_lband()
-    df[f"BB_middle_{timeframe}"]    = bb.bollinger_mavg()
-    df[f"ATR_{timeframe}"]          = atr.average_true_range()
-
-    if timeframe in {"daily", "hourly"}:
-        df[f"EMA50_{timeframe}"]  = EMAIndicator(close=df["Close"], window=50).ema_indicator()
-        df[f"EMA200_{timeframe}"] = EMAIndicator(close=df["Close"], window=200).ema_indicator()
-
-    # ===== extra Sequoia pieces (only once on DAILY bars) ===========
-    if timeframe == "daily":
-        # --- Hull MA & slope ---------------------------------------
-        def _hull(close, n):
-            wma_half = WMAIndicator(close, window=n//2).wma()
-            wma_root = WMAIndicator(close, window=int(np.sqrt(n))).wma()
-            return 2 * wma_half - wma_root
-
-        hma = _hull(df["Close"], 20)
-        df["HMA_daily"]       = hma
-        df["HMA_slope_daily"] = hma.diff()
-
-        # --- DI difference -----------------------------------------
-        df["DI_diff_daily"] = df["ADX_pos_daily"] - df["ADX_neg_daily"]
-
-        # --- yesterday’s high/low (for stop/target calc) -----------
-        df["PrevHigh_daily"] = df["High"].shift(1)
-        df["PrevLow_daily"]  = df["Low"].shift(1)
-
-        # --- scanner boolean flags ---------------------------------
-        macd_green  = df["MACD_hist_daily"] > 0
-        hull_green  = df["HMA_slope_daily"] > 0
-        dmi_green   = df["DI_diff_daily"]   > 0
-        atr_ok      = df["ATR_daily"]       > 0.50
-        vol_ok      = df["Volume"]          > df["Volume"].shift(1) * 0.8
-        hollow      = df["Close"] > df["Open"]
-        solid       = df["Close"] < df["Open"]
-        ushadow_ok  = (df["High"] - df["Close"]) / (df["High"] - df["Low"] + 1e-9) < 0.2
-        lshadow_ok  = (df["Close"] - df["Low"])  / (df["High"] - df["Low"] + 1e-9) < 0.2
-
-        df["Sequoia_long"]  = (macd_green & hull_green & dmi_green &
-                               hollow & ushadow_ok & vol_ok & atr_ok)
-        df["Sequoia_short"] = (~macd_green & ~hull_green & ~dmi_green &
-                               solid  & lshadow_ok & vol_ok & atr_ok)
-
+def compute_indicators(df:pd.DataFrame,timeframe:str="daily")->pd.DataFrame:
+    df=df.copy(); req={"Open","High","Low","Close","Volume"}
+    if df.empty or not req.issubset(df.columns): return df
+    w=14; rsi,adx,stoch,cci,macd,bb,atr=RSIIndicator(df["Close"],w).rsi(),ADXIndicator(df["High"],df["Low"],df["Close"],w),StochasticOscillator(df["High"],df["Low"],df["Close"],w,3),CCIIndicator(df["High"],df["Low"],df["Close"],20,0.015),MACD(df["Close"],26,12,9),BollingerBands(df["Close"],20,2),AverageTrueRange(df["High"],df["Low"],df["Close"],w)
+    df[f"RSI_{timeframe}"]=rsi; df[f"ADX_{timeframe}"]=adx.adx(); df[f"ADX_pos_{timeframe}"]=adx.adx_pos(); df[f"ADX_neg_{timeframe}"]=adx.adx_neg(); df[f"STOCHk_{timeframe}"]=stoch.stoch(); df[f"STOCHd_{timeframe}"]=stoch.stoch_signal(); df[f"CCI_{timeframe}"]=cci.cci(); df[f"MACD_{timeframe}"]=macd.macd(); df[f"MACD_signal_{timeframe}"]=macd.macd_signal(); df[f"MACD_hist_{timeframe}"]=macd.macd_diff(); df[f"BB_upper_{timeframe}"]=bb.bollinger_hband(); df[f"BB_lower_{timeframe}"]=bb.bollinger_lband(); df[f"BB_middle_{timeframe}"]=bb.bollinger_mavg(); df[f"ATR_{timeframe}"]=atr.average_true_range()
+    if timeframe in {"daily","hourly"}: df[f"EMA50_{timeframe}"]=EMAIndicator(df["Close"],50).ema_indicator(); df[f"EMA200_{timeframe}"]=EMAIndicator(df["Close"],200).ema_indicator()
+    if timeframe=="daily":
+        def _h(c,n): wmh,wmr=WMAIndicator(c,n//2).wma(),WMAIndicator(c,int(np.sqrt(n))).wma(); return 2*wmh-wmr
+        hma=_h(df["Close"],20); df["HMA_daily"],df["HMA_slope_daily"],df["DI_diff_daily"]=hma,hma.diff(),df["ADX_pos_daily"]-df["ADX_neg_daily"]; df["PrevHigh_daily"],df["PrevLow_daily"]=df["High"].shift(1),df["Low"].shift(1)
+        mg,hg,dg,ao,vo,hl,sl,uo,lo=df["MACD_hist_daily"]>0,df["HMA_slope_daily"]>0,df["DI_diff_daily"]>0,df["ATR_daily"]>0.50,df["Volume"]>df["Volume"].shift(1)*0.8,df["Close"]>df["Open"],df["Close"]<df["Open"],(df["High"]-df["Close"])/(df["High"]-df["Low"]+1e-9)<0.2,(df["Close"]-df["Low"])/(df["High"]-df["Low"]+1e-9)<0.2
+        df["Sequoia_long"]=(mg&hg&dg&hl&uo&vo&ao); df["Sequoia_short"]=(~mg&~hg&~dg&sl&lo&vo&ao)
     return df
 
+def compute_anchored_vwap(df:pd.DataFrame,lookback_bars:int=252)->pd.Series:
+    if df.empty or not {"Close","Low","Volume"}.issubset(df.columns): return pd.Series(dtype=float,index=df.index)
+    anchor=df.tail(lookback_bars)['Low'].idxmin()
+    if pd.isna(anchor): return pd.Series(np.nan,index=df.index)
+    after,cum_vol,cum_dollars=df.loc[anchor:].copy(),df.loc[anchor:]['Volume'].cumsum(),(df.loc[anchor:]['Close']*df.loc[anchor:]['Volume']).cumsum()
+    out=pd.Series(np.nan,index=df.index); out.loc[after.index]=cum_dollars/cum_vol; out.name='AnchoredVWAP'; return out
 
-def compute_anchored_vwap(
-        df: pd.DataFrame,
-        lookback_bars: int = 252
-) -> pd.Series:
-    if df.empty or not {"Close", "Low", "Volume"}.issubset(df.columns):
-        return pd.Series(dtype=float, index=df.index)
+def to_daily(intra_df,label):
+    if intra_df.empty: return pd.DataFrame()
+    daily_data=intra_df.groupby(intra_df.index.date).tail(1); daily_data.index=pd.to_datetime(daily_data.index.date); daily_data.index.name='Date'; return daily_data
 
-    recent  = df.tail(lookback_bars)
-    anchor  = recent['Low'].idxmin()
-    if pd.isna(anchor):
-        return pd.Series(np.nan, index=df.index)
-
-    after        = df.loc[anchor:].copy()
-    cum_vol      = after['Volume'].cumsum()
-    cum_dollars  = (after['Close'] * after['Volume']).cumsum()
-    vwap_series  = cum_dollars / cum_vol
-
-    out = pd.Series(np.nan, index=df.index)
-    out.loc[vwap_series.index] = vwap_series
-    out.name = 'AnchoredVWAP'
-    return out
-
-
-
-def to_daily(intra_df, label):
-    """
-    Convert intraday data to daily frequency using the last valid bar of each day.
-    """
-    if intra_df.empty:
-        #print(f"[DEBUG] to_daily: {label} is empty, skipping.")
-        return pd.DataFrame()
-    daily_data = intra_df.groupby(intra_df.index.date).tail(1)
-    daily_data.index = pd.to_datetime(daily_data.index.date)
-    daily_data.index.name = 'Date'
-    return daily_data
-
-
-def prepare_features(
-    df_5m:  pd.DataFrame,
-    df_30m: pd.DataFrame,
-    df_1h:  pd.DataFrame,
-    df_90m: pd.DataFrame,
-    df_1d:  pd.DataFrame,
-    *,
-    horizon: int = 10,
-    drop_recent: bool = True
-) -> pd.DataFrame:
-
-    # ---------- indicators -------------------------------------------
-    ind_5m  = compute_indicators(df_5m.copy(),  timeframe='5m')
-    ind_30m = compute_indicators(df_30m.copy(), timeframe='30m')
-    ind_1h  = compute_indicators(df_1h.copy(),  timeframe='hourly')
-    ind_90m = compute_indicators(df_90m.copy(), timeframe='90m')
-    ind_1d  = compute_indicators(df_1d.copy(),  timeframe='daily')
-    ind_5m['AnchoredVWAP_5m']   = compute_anchored_vwap(ind_5m,  lookback_bars=2000)
-    ind_30m['AnchoredVWAP_30m'] = compute_anchored_vwap(ind_30m, lookback_bars=200)
-    ind_1h['AnchoredVWAP_1h']   = compute_anchored_vwap(ind_1h,  lookback_bars=120)
-
-    # existing daily vwap
-    ind_1d['AnchoredVWAP']      = compute_anchored_vwap(ind_1d,  lookback_bars=252)
-
-    # ---------- collapse intraday to daily ---------------------------
-    daily_5m  = to_daily(ind_5m,  "5m")
-    daily_30m = to_daily(ind_30m, "30m")
-    daily_1h  = to_daily(ind_1h,  "1h")
-    daily_90m = to_daily(ind_90m, "90m")
-
-    ind_1d.index.name = 'Date'
-    features_df = (
-        ind_1d
-          .join(daily_5m,  rsuffix='_5m')
-          .join(daily_30m, rsuffix='_30m')
-          .join(daily_1h,  rsuffix='_1h')
-          .join(daily_90m, rsuffix='_90m')
-    )
-
-
-    # ---------- label & post-process (unchanged) ---------------------
-    features_df.dropna(subset=['Close'], inplace=True)
-    if features_df.empty:
-        return features_df
-
-    atr = features_df['ATR_daily'].fillna(0)
-    upper = features_df['Close'] + 2.0 * atr
-    lower = features_df['Close'] - 2.0 * atr
-    closes = features_df['Close'].values
-    labels = np.ones(len(features_df), dtype=int)
-
-    for i in range(len(features_df) - horizon):
-        win = closes[i + 1 : i + 1 + horizon]
-        up  = np.where(win >= upper.iloc[i])[0]
-        dn  = np.where(win <= lower.iloc[i])[0]
-        if up.size and dn.size:
-            labels[i] = 2 if up[0] < dn[0] else 0
-        elif up.size:
-            labels[i] = 2
-        elif dn.size:
-            labels[i] = 0
-
-    features_df['future_class'] = labels
-    if drop_recent:
-        features_df = features_df.iloc[:-horizon]
-    else:
-        features_df.loc[features_df.index[-horizon:], 'future_class'] = np.nan
-
+def prepare_features(df_5m:pd.DataFrame,df_30m:pd.DataFrame,df_1h:pd.DataFrame,df_90m:pd.DataFrame,df_1d:pd.DataFrame,*,horizon:int=10,drop_recent:bool=True)->pd.DataFrame:
+    inds=[compute_indicators(df.copy(),lbl) for df,lbl in zip([df_5m,df_30m,df_1h,df_90m,df_1d],['5m','30m','hourly','90m','daily'])]
+    inds[0]['AnchoredVWAP_5m']=compute_anchored_vwap(inds[0],2000)
+    inds[1]['AnchoredVWAP_30m']=compute_anchored_vwap(inds[1],200)
+    inds[2]['AnchoredVWAP_1h']=compute_anchored_vwap(inds[2],120)
+    ind_1d=inds[4]; ind_1d['AnchoredVWAP']=compute_anchored_vwap(ind_1d,252)
+    dailies=[to_daily(i,lbl) for i,lbl in zip(inds[:-1],['5m','30m','hourly','90m'])]
+    features_df=ind_1d
+    for daily_df, suffix in zip(dailies, ['_5m', '_30m', '_1h', '_90m']):
+        features_df = features_df.join(daily_df, rsuffix=suffix)
+    features_df.dropna(subset=['Close'],inplace=True)
+    if features_df.empty: return features_df
+    atr,closes,labels=features_df['ATR_daily'].fillna(0),features_df['Close'].values,np.ones(len(features_df),dtype=int)
+    up,dn=features_df['Close']+2.0*atr, features_df['Close']-2.0*atr
+    for i in range(len(features_df)-horizon):
+        w,u_idx,d_idx=closes[i+1:i+1+horizon],np.where(closes[i+1:i+1+horizon]>=up.iloc[i])[0],np.where(closes[i+1:i+1+horizon]<=dn.iloc[i])[0]
+        if u_idx.size and d_idx.size: labels[i]=2 if u_idx[0]<d_idx[0] else 0
+        elif u_idx.size: labels[i]=2
+        elif d_idx.size: labels[i]=0
+    features_df['future_class']=labels
+    if drop_recent: features_df=features_df.iloc[:-horizon]
+    else: features_df.loc[features_df.index[-horizon:],'future_class']=np.nan
     return features_df
 
-
-def refine_features(features_df, importance_cutoff=0.0001, corr_threshold=0.9):
-    """
-    Simple feature-refinement approach:
-    1) Train a quick baseline XGBoost model to get feature importances.
-    2) Drop near-zero importance features.
-    3) Drop one of any pair of features with high correlation (above corr_threshold).
-    """
-    if features_df.empty or 'future_class' not in features_df.columns:
-        return features_df
-
-    y = features_df['future_class']
-    X = features_df.drop(columns=['future_class']).copy()
-
-    # Fill missing
-    X.ffill(inplace=True)
-    X.bfill(inplace=True)
-
-    # Quick baseline XGB
-    model = XGBClassifier(
-        objective='multi:softmax',
-        num_class=3,
-        use_label_encoder=False,
-        eval_metric='mlogloss',
-        verbosity=0,
-        tree_method='hist',      # GPU
-        device='cuda'    # GPU
-    )
-
-    split_idx = int(0.8 * len(X))
-    X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
-    y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
-
-    if len(np.unique(y_train)) < 2:
-        #print("[DEBUG] refine_features: Not enough classes to train. Skipping.")
-        return features_df
-
-    model.fit(X_train, y_train)
-    importances = model.feature_importances_
-    feat_importance_series = pd.Series(importances, index=X.columns).sort_values(ascending=False)
-
-    # Drop near-zero importance
-    drop_by_importance = feat_importance_series[feat_importance_series < importance_cutoff].index.tolist()
-    if drop_by_importance:
-        X.drop(columns=drop_by_importance, inplace=True, errors='ignore')
-
-    # Drop highly correlated features
-    numeric_cols = X.select_dtypes(include=[np.number]).columns
-    corr_matrix = X[numeric_cols].corr()
-    upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
-    drop_by_corr = [col for col in upper.columns if any(upper[col].abs() > corr_threshold)]
-    if drop_by_corr:
-        X.drop(columns=drop_by_corr, inplace=True, errors='ignore')
-
-    refined_df = X.join(y)
-    return refined_df
-
-
-def tune_threshold_and_train(features_df):
-    """
-    Tune the future return threshold for classification, then train the final XGBoost model.
-    Returns (model, best_threshold).
-    """
-    if features_df.empty or 'future_class' not in features_df.columns:
-        return None, None
-
-    feature_cols = [c for c in features_df.columns if c != 'future_class']
-    X_full = features_df[feature_cols].copy()
-    X_full.ffill(inplace=True)
-    X_full.bfill(inplace=True)
-
-    y_full = features_df['future_class']
-    split_idx = int(len(features_df) * 0.8)
-    X_train, X_test = X_full.iloc[:split_idx], X_full.iloc[split_idx:]
-    y_train, y_test = y_full.iloc[:split_idx], y_full.iloc[split_idx:]
- 
-    train_data = pd.concat([X_train, y_train], axis=1)
-    class_0 = train_data[train_data['future_class'] == 0]
-    class_1 = train_data[train_data['future_class'] == 1]
-    class_2 = train_data[train_data['future_class'] == 2]
-
-    # If significantly fewer 0 or 2 than 1, oversample them
-    max_count = max(len(class_0), len(class_1), len(class_2))
-    class_0_up = resample(class_0, replace=True, n_samples=max_count, random_state=42)
-    class_1_up = resample(class_1, replace=True, n_samples=max_count, random_state=42)
-    class_2_up = resample(class_2, replace=True, n_samples=max_count, random_state=42)
-
-    train_oversampled = pd.concat([class_0_up, class_1_up, class_2_up], axis=0)
-    X_train = train_oversampled.drop(columns=['future_class'])
-    y_train = train_oversampled['future_class']
-
-    best_thr = None
-    best_score = -np.inf
-
-    # Simple threshold tuning in 1%-5% increments
-    for thr in [0.01, 0.02, 0.03, 0.04, 0.05]:
-        if 'Close' not in features_df.columns:
-            continue
-        future_ret_train = (features_df['Close'][:split_idx].shift(-5) / features_df['Close'][:split_idx] - 1.0)
-        future_ret_test  = (features_df['Close'][split_idx:].shift(-5) / features_df['Close'][split_idx:] - 1.0)
-
-        y_train_temp = y_train.copy()
-        y_test_temp  = y_test.copy()
-
-        # Re-label train
-        y_train_temp[:] = 1
-        y_train_temp[future_ret_train > thr] = 2
-        y_train_temp[future_ret_train < -thr] = 0
-
-        # Re-label test
-        y_test_temp[:] = 1
-        y_test_temp[future_ret_test > thr] = 2
-        y_test_temp[future_ret_test < -thr] = 0
-
-        unique_classes = np.unique(y_train_temp)
-        if len(unique_classes) < 3:
-            continue
-
-        model = XGBClassifier(
-#            objective='multi:softmax',
-#            num_class=3,
-#            use_label_encoder=False,
-#            eval_metric='mlogloss',
-#            verbosity=0,
-#            tree_method='hist',      # GPU
-#            device='cuda'   # GPU
-            objective='multi:softprob',   # so we can use probabilities
-            num_class=3,
-            use_label_encoder=False,
-            eval_metric='mlogloss',
-            verbosity=0,
-            tree_method='hist',
-            device='cuda',
-            max_depth=5,         # shallower trees
-            min_child_weight=10, # require more samples per leaf
-            gamma=1.0,           # min split loss
-            subsample=0.8,       # row subsampling
-            colsample_bytree=0.8,# feature subsampling
-            learning_rate=0.05,  # slower learning
-            n_estimators=500
-        )
-        model.fit(X_train, y_train_temp)
-        y_pred = model.predict(X_test)
-        report = classification_report(y_test_temp, y_pred, output_dict=True, zero_division=0)
-        f1_long = report.get('2', {}).get('f1-score', 0.0)
-        f1_short= report.get('0', {}).get('f1-score', 0.0)
-        avg_f1  = (f1_long + f1_short)/2.0
-
-        if avg_f1 > best_score:
-            best_score = avg_f1
-            best_thr   = thr
-
-    if best_thr is None:
-        return None, None
-
-    # Rebuild final_y using best_thr
-    future_ret_all = (features_df['Close'].shift(-5) / features_df['Close'] - 1.0)
-    final_y = y_full.copy()
-    final_y[:] = 1
-    final_y[future_ret_all > best_thr] = 2
-    final_y[future_ret_all < -best_thr] = 0
-
-    if len(np.unique(final_y)) < 3:
-        return None, best_thr
-
-    final_model = XGBClassifier(
-        objective='multi:softprob',
-        num_class=3,
-        use_label_encoder=False,
-        eval_metric='mlogloss',
-        verbosity=0,
-        tree_method='hist',      # GPU
-        device='cuda'    # GPU
-    )
-    final_model.fit(X_full, final_y)
-    return final_model, best_thr
-
-def generate_signal_output(ticker, latest_row, model, thr):
-    """
-    Turn the latest feature row into a LONG/SHORT text summary
-    – honour Sequoia filters
-    – stop 0.5 % beyond yesterday’s low/high
-    – profit ≥ max( 2R , 10 % ).
-    """
-    # -------- probability / class -----------------------------------
-    probs      = model.predict_proba(latest_row.to_frame().T.values)[0]
-    class_idx  = int(np.argmax(probs))
-    prob_score = probs[class_idx]
-
-    if prob_score < 0.60 or class_idx == 1:
-        return None                    # neutral/low-confidence
-
-    direction = "LONG" if class_idx == 2 else "SHORT"
-    if direction == "LONG" and not latest_row.get("Sequoia_long", False):
-        return None
-    if direction == "SHORT" and not latest_row.get("Sequoia_short", False):
-        return None
-
-    price     = float(latest_row["Close"])
-    prev_low  = float(latest_row.get("PrevLow_daily", np.nan))
-    prev_high = float(latest_row.get("PrevHigh_daily", np.nan))
-
-    if direction == "LONG":
-        stop    = prev_low * 0.995 if not np.isnan(prev_low) else price * 0.94
-        risk    = price - stop
-        min_trg = price * 1.10
-        target  = price + max(2 * risk, min_trg - price)
-    else:  # SHORT
-        stop    = prev_high * 1.005 if not np.isnan(prev_high) else price * 1.06
-        risk    = stop - price
-        min_trg = price * 0.90
-        target  = price - max(2 * risk, price - min_trg)
-
-    colour = Fore.GREEN if direction == "LONG" else Fore.RED
-    return (f"{Fore.CYAN}{ticker}{Style.RESET_ALL}: {colour}{direction}{Style.RESET_ALL} "
-            f"@ ${price:.2f}  Stop ${stop:.2f}  Target ${target:.2f}  "
-            f"P={prob_score:.2f}")
-
-
-def _build_entry(row, direction):
-    """
-    Return (stop_price, target_price) applying the 0.5 % prev-day rule
-    and ≥2R / ≥10 % profit logic.  `row` must be a DAILY feature row.
-    """
-    price = float(row["Close"])
-    if direction == "LONG":
-        prev_low = float(row.get("PrevLow_daily", np.nan))
-        stop     = prev_low * 0.995 if not np.isnan(prev_low) else price * 0.94
-        risk     = price - stop
-        tgt_abs  = price * 1.10                      # +10 %
-        target   = price + max(2 * risk, tgt_abs - price)
-    else:  # SHORT
-        prev_hi  = float(row.get("PrevHigh_daily", np.nan))
-        stop     = prev_hi * 1.005 if not np.isnan(prev_hi) else price * 1.06
-        risk     = stop - price
-        tgt_abs  = price * 0.90                      # –10 %
-        target   = price - max(2 * risk, price - tgt_abs)
-    return stop, target
-
-
-def backtest_strategy(ticker, start_date, end_date, log_file=None):
-    """
-    Daily-bars swing-trade back-test:
-      • uses Sequoia_long / Sequoia_short flags
-      • stop = 0.5 % beyond yesterday’s low (long) or high (short)
-      • target = max(2 × risk , 10 % absolute)
-    """
-    # ── data & feature prep ───────────────────────────────────────────
-    df_5m, df_30m, df_1h, df_90m, df_1d = fetch_data(
-        ticker, start=start_date, end=end_date
-    )
-    feat = prepare_features(df_5m, df_30m, df_1h, df_90m, df_1d)
-    feat = refine_features(feat)
-    model, _ = tune_threshold_and_train(feat)
-    if model is None:
-        print(Fore.YELLOW + f"Model training failed for {ticker}." + Style.RESET_ALL)
-        return
-
-    X_all   = feat.drop(columns=['future_class']).ffill().bfill()
-    preds   = model.predict(X_all)
-    probas  = model.predict_proba(X_all)
-    df_pred = feat.copy()
-    df_pred['prediction'] = preds
-
-    # ── trade simulation ─────────────────────────────────────────────
-    trades  = []
-    in_pos  = False
-    dir_    = None
-    entry_price = stop_price = target_price = None
-    entry_ts    = None
-
-    for idx, row in df_pred.iterrows():
-        price = row["Close"]
-
-        # ---- manage open position ----------------------------------
-        if in_pos:
-            hit_stop   = (price <= stop_price) if dir_ == "LONG" else (price >= stop_price)
-            hit_target = (price >= target_price) if dir_ == "LONG" else (price <= target_price)
-            if hit_stop or hit_target:
-                pnl = (price - entry_price) / entry_price if dir_ == "LONG" \
-                      else (entry_price - price) / entry_price
-                trades.append({
-                    "entry_timestamp": entry_ts, "exit_timestamp": idx,
-                    "direction": dir_,
-                    "entry_price": round(entry_price, 2),
-                    "exit_price":  round(price, 2),
-                    "pnl_pct":     round(pnl, 4),
-                    "stop_price":  round(stop_price, 2),
-                    "target_price":round(target_price, 2)
-                })
-                in_pos = False
-            if in_pos:
-                continue            # still in trade – skip new entry logic
-
-        # ---- flat: evaluate new entry ------------------------------
-        cls       = int(row["prediction"])
-        prob      = probas[df_pred.index.get_loc(idx)][cls]
-        if prob < 0.60:
-            continue
-
-        if cls == 2 and row.get("Sequoia_long", False):
-            dir_ = "LONG"
-        elif cls == 0 and row.get("Sequoia_short", False):
-            dir_ = "SHORT"
-        else:
-            continue               # not a valid Sequoia setup
-
-        entry_price            = price
-        stop_price, target_price = _build_entry(row, dir_)
-        entry_ts               = idx
-        in_pos                 = True
-
-    if not trades:
-        print(Fore.YELLOW + f"No trades for {ticker}." + Style.RESET_ALL)
-        return
-
-    # ── performance summary (unchanged) ─────────────────────────────
-    trades_df = pd.DataFrame(trades)
-    summary   = _summarise_performance(trades_df, len(feat))
-
-    pct = lambda x: f"{x*100:.2f}%"
-    print(Fore.BLUE + f"\nBacktest Results for {ticker}" + Style.RESET_ALL +
-          f" ({start_date} → {end_date}):")
-    print(f"  Total trades        : {Fore.CYAN}{summary['total']}{Style.RESET_ALL}")
-    print(f"  Win rate            : {Fore.CYAN}{pct(summary['win_rate'])}{Style.RESET_ALL}")
-    print(f"  Avg P/L per trade   : {Fore.CYAN}{pct(summary['avg_pnl'])}{Style.RESET_ALL}")
-    print(f"  Sharpe (trade)      : {Fore.CYAN}{summary['sharpe']:.2f}{Style.RESET_ALL}")
-    print(f"  Max drawdown        : {Fore.CYAN}{pct(summary['max_dd'])}{Style.RESET_ALL}")
-    print(f"  Time-in-market      : {Fore.CYAN}{pct(summary['tim'])}{Style.RESET_ALL}")
-
-    # (CSV logging logic – keep your existing code here if needed)
-
-
-def prepare_features_intraday(
-    df_30m: pd.DataFrame | None = None
-) -> pd.DataFrame:
-    """
-    30-minute feature set with its own Anchored VWAP_30m plus daily context.
-    """
-    df_30m = df_30m.copy()
-    df_30m = compute_indicators(df_30m, timeframe='intraday')
-    df_30m['AnchoredVWAP_30m'] = compute_anchored_vwap(df_30m, lookback_bars=200)
-
-    if df_30m.empty or 'Close' not in df_30m.columns:
-        return pd.DataFrame()
-
-    daily = to_daily(df_30m, "intraday")
-    daily = compute_indicators(daily, timeframe='daily')
-    daily['AnchoredVWAP'] = compute_anchored_vwap(daily, lookback_bars=252)
-
-    # drop tz for safe join
-    if daily.index.tz is not None:
-        daily.index = daily.index.tz_localize(None)
-    if df_30m.index.tz is not None:
-        df_30m.index = df_30m.index.tz_localize(None)
-
-    df_30m = df_30m.join(daily.reindex(df_30m.index, method='ffill'), rsuffix='_daily')
-
-    # ---------- triple-barrier labelling on 30-min bars --------------
-    horizon_bars = 16
-    atr_col = 'ATR_intraday'
-    if atr_col not in df_30m.columns:
-        df_30m[atr_col] = df_30m['Close'].rolling(14).std().fillna(0)
-
-    up = df_30m['Close'] + 2 * df_30m[atr_col]
-    dn = df_30m['Close'] - 2 * df_30m[atr_col]
-    cls = df_30m['Close'].values
-    lbl = np.ones(len(df_30m), int)
-
-    for i in range(len(df_30m) - horizon_bars):
-        win = cls[i+1 : i+1+horizon_bars]
-        a   = np.where(win >= up.iloc[i])[0]
-        b   = np.where(win <= dn.iloc[i])[0]
-        if a.size and b.size:
-            lbl[i] = 2 if a[0] < b[0] else 0
-        elif a.size:
-            lbl[i] = 2
-        elif b.size:
-            lbl[i] = 0
-
-    df_30m['future_class'] = lbl
-    df_30m = df_30m.iloc[:-horizon_bars]
-
-
-
-def backtest_strategy_intraday(ticker, start_date, end_date,  log_file=None):
-    """
-    30-minute intraday back-test with Sequoia filtering and the same
-    stop/target mechanics as the daily strategy.
-    """
-    _, df_30m, _, _, _ = fetch_data(ticker, start=start_date, end=end_date)
-
-    feat = prepare_features_intraday(df_30m)
-    feat = refine_features(feat)
-    model, _ = tune_threshold_and_train(feat)
-    if model is None:
-        print(Fore.YELLOW + f"Model training failed for {ticker}." + Style.RESET_ALL)
-        return
-
-    X_all   = feat.drop(columns=['future_class']).ffill().bfill()
-    preds   = model.predict(X_all)
-    probas  = model.predict_proba(X_all)
-    df_pred = feat.copy()
-    df_pred['prediction'] = preds
-
-    trades  = []
-    in_pos  = False
-    dir_    = None
-    entry_price = stop_price = target_price = None
-    entry_ts    = None
-
-    for idx, row in df_pred.iterrows():
-        price = row["Close"]
-
-        # ---- manage open position ----------------------------------
-        if in_pos:
-            hit_stop   = (price <= stop_price) if dir_ == "LONG" else (price >= stop_price)
-            hit_target = (price >= target_price) if dir_ == "LONG" else (price <= target_price)
-            if hit_stop or hit_target:
-                pnl = (price - entry_price) / entry_price if dir_ == "LONG" \
-                      else (entry_price - price) / entry_price
-                trades.append({
-                    "entry_timestamp": entry_ts, "exit_timestamp": idx,
-                    "direction": dir_,
-                    "entry_price": round(entry_price, 2),
-                    "exit_price":  round(price, 2),
-                    "pnl_pct":     round(pnl, 4),
-                    "stop_price":  round(stop_price, 2),
-                    "target_price":round(target_price, 2)
-                })
-                in_pos = False
-            if in_pos:
-                continue
-
-        # ---- flat: evaluate new entry ------------------------------
-        cls  = int(row["prediction"])
-        prob = probas[df_pred.index.get_loc(idx)][cls]
-        if prob < 0.60:
-            continue
-
-        if cls == 2 and row.get("Sequoia_long", False):
-            dir_ = "LONG"
-        elif cls == 0 and row.get("Sequoia_short", False):
-            dir_ = "SHORT"
-        else:
-            continue                # not a scanner-approved bar
-
-        entry_price            = price
-        stop_price, target_price = _build_entry(row, dir_)
-        entry_ts               = idx
-        in_pos                 = True
-
-    if not trades:
-        print(Fore.YELLOW + f"No trades for {ticker} intraday." + Style.RESET_ALL)
-        return
-
-    trades_df = pd.DataFrame(trades)
-    summary   = _summarise_performance(trades_df, len(feat))
-
-    pct = lambda x: f"{x*100:.2f}%"
-    print(Fore.BLUE + f"\nBacktest Results for {ticker}" + Style.RESET_ALL +
-          f" ({start_date} → {end_date}):")
-    print(f"  Total trades        : {Fore.CYAN}{summary['total']}{Style.RESET_ALL}")
-    print(f"  Win rate            : {Fore.CYAN}{pct(summary['win_rate'])}{Style.RESET_ALL}")
-    print(f"  Avg P/L per trade   : {Fore.CYAN}{pct(summary['avg_pnl'])}{Style.RESET_ALL}")
-    print(f"  Sharpe (trade)      : {Fore.CYAN}{summary['sharpe']:.2f}{Style.RESET_ALL}")
-    print(f"  Max drawdown        : {Fore.CYAN}{pct(summary['max_dd'])}{Style.RESET_ALL}")
-    print(f"  Time-in-market      : {Fore.CYAN}{pct(summary['tim'])}{Style.RESET_ALL}")
-
-    # (CSV logging logic – keep your existing code here if needed)
-
-
-def run_signals_on_watchlists(use_intraday: bool = True):
-
-    # ------------- one bulk fetch populates the on-disk cache ---------
-    all_syms = load_watchlist("long") + load_watchlist("short")
-    preload_interval_cache(all_syms, period="60d",  interval="30m")   # intraday bars
-    preload_interval_cache(all_syms, period="380d", interval="1d")    # daily bars
-    # ------------------------------------------------------------------
-
-    fred_api_key = load_config()
-    today        = datetime.datetime.today()
-
-
-    for side in ("long", "short"):
-        tickers = load_watchlist(side)
-        if not tickers:
-            continue
-        print(f"\n==========   {side.upper()} WATCH-LIST   ==========")
-        want_dir = "LONG" if side == "long" else "SHORT"
-
+def refine_features(df,cut=0.0001,corr=0.9):
+    if df.empty or 'future_class' not in df.columns: return df
+    y,X=df['future_class'],df.drop(columns=['future_class']).copy().ffill().bfill()
+    m=XGBClassifier(objective='multi:softmax',num_class=3,use_label_encoder=False,eval_metric='mlogloss',verbosity=0,tree_method='hist',device='cuda')
+    s=int(0.8*len(X)); Xt,Xv,yt,yv=X.iloc[:s],X.iloc[s:],y.iloc[:s],y.iloc[s:]
+    if len(np.unique(yt))<2: return df
+    m.fit(Xt,yt); imp=pd.Series(m.feature_importances_,index=X.columns).sort_values(ascending=False)
+    X.drop(columns=imp[imp<cut].index.tolist(),inplace=True,errors='ignore')
+    cm=X.select_dtypes(include=[np.number]).corr(); up=cm.where(np.triu(np.ones(cm.shape),k=1).astype(bool))
+    X.drop(columns=[c for c in up.columns if any(up[c].abs()>corr)],inplace=True,errors='ignore'); return X.join(y)
+
+def tune_threshold_and_train(df):
+    if df.empty or 'future_class' not in df.columns: return None,None
+    Xf,yf=df.drop(columns=['future_class']).copy().ffill().bfill(),df['future_class']
+    s=int(len(df)*0.8); Xt,yt=Xf.iloc[:s],yf.iloc[:s]
+    td=pd.concat([Xt,yt],axis=1); cs=[td[td['future_class']==i] for i in range(3)]
+    mc=max(len(c) for c in cs if c is not None and not c.empty); ts=pd.concat([resample(c,replace=True,n_samples=mc,random_state=42) for c in cs if c is not None and not c.empty],axis=0)
+    Xt,yt=ts.drop(columns=['future_class']),ts['future_class']
+    bt,bs=None,-np.inf
+    for thr in [0.01,0.02,0.03,0.04,0.05]:
+        if 'Close' not in df.columns: continue
+        frt,frv=(df['Close'][:s].shift(-5)/df['Close'][:s]-1.0),(df['Close'][s:].shift(-5)/df['Close'][s:]-1.0)
+        ytt,ytv=yt.copy(),yf.iloc[s:].copy(); ytt[:]=1;ytt[frt>thr]=2;ytt[frt<-thr]=0; ytv[:]=1;ytv[frv>thr]=2;ytv[frv<-thr]=0
+        if len(np.unique(ytt))<3: continue
+        m=XGBClassifier(objective='multi:softprob',num_class=3,use_label_encoder=False,eval_metric='mlogloss',verbosity=0,tree_method='hist',device='cuda',max_depth=5,min_child_weight=10,gamma=1.0,subsample=0.8,colsample_bytree=0.8,learning_rate=0.05,n_estimators=500)
+        m.fit(Xt,ytt); yp=m.predict(Xf.iloc[s:])
+        r=classification_report(ytv,yp,output_dict=True,zero_division=0); af1=(r.get('2',{}).get('f1-score',0.0)+r.get('0',{}).get('f1-score',0.0))/2.0
+        if af1>bs: bs,bt=af1,thr
+    if bt is None: return None,None
+    frall=(df['Close'].shift(-5)/df['Close']-1.0); fy=yf.copy(); fy[:]=1;fy[frall>bt]=2;fy[frall<-bt]=0
+    if len(np.unique(fy))<3: return None,bt
+    fm=XGBClassifier(objective='multi:softprob',num_class=3,use_label_encoder=False,eval_metric='mlogloss',verbosity=0,tree_method='hist',device='cuda'); fm.fit(Xf,fy); return fm,bt
+
+def generate_signal_output(t,lr,m,thr):
+    p=m.predict_proba(lr.to_frame().T.values)[0]; ci,ps=int(np.argmax(p)),p[int(np.argmax(p))]
+    if ps<0.60 or ci==1: return None
+    d="LONG" if ci==2 else "SHORT"
+    if (d=="LONG" and not lr.get("Sequoia_long",False)) or (d=="SHORT" and not lr.get("Sequoia_short",False)): return None
+    pr,pl,ph=float(lr["Close"]),float(lr.get("PrevLow_daily",np.nan)),float(lr.get("PrevHigh_daily",np.nan))
+    if d=="LONG": st,ri,mt,ta=(pl*0.995 if not np.isnan(pl) else pr*0.94),0.0,pr*1.10,0.0; ri=pr-st; ta=pr+max(2*ri,mt-pr)
+    else: st,ri,mt,ta=(ph*1.005 if not np.isnan(ph) else pr*1.06),0.0,pr*0.90,0.0; ri=st-pr; ta=pr-max(2*ri,pr-mt)
+    cl=Fore.GREEN if d=="LONG" else Fore.RED; return (f"{Fore.CYAN}{t}{Style.RESET_ALL}: {cl}{d}{Style.RESET_ALL} @ ${pr:.2f} Stop ${st:.2f} Target ${ta:.2f} P={ps:.2f}")
+
+def _build_entry(r,d):
+    pr=float(r["Close"])
+    if d=="LONG": pl,st,ri,ta,tr=(float(r.get("PrevLow_daily",np.nan))),0.0,0.0,pr*1.10,0.0; st=(pl*0.995 if not np.isnan(pl) else pr*0.94); ri=pr-st; tr=pr+max(2*ri,ta-pr); return st,tr
+    else: ph,st,ri,ta,tr=(float(r.get("PrevHigh_daily",np.nan))),0.0,0.0,pr*0.90,0.0; st=(ph*1.005 if not np.isnan(ph) else pr*1.06); ri=st-pr; tr=pr-max(2*ri,pr-ta); return st,tr
+
+def _summarise_performance(trades_df, total_days):
+    if trades_df.empty: return {"total":0,"win_rate":0,"avg_pnl":0,"sharpe":0,"max_dd":0,"tim":0}
+    summary = {"total":len(trades_df),"win_rate":np.mean(trades_df.pnl_pct > 0) if not trades_df.empty else 0,"avg_pnl":np.mean(trades_df.pnl_pct) if not trades_df.empty else 0,"sharpe":0,"max_dd":0,"tim":0}
+    return summary
+
+def backtest_strategy(t,sd,ed,lf=None):
+    d5,d30,d1h,d90,d1d=fetch_data(t,start=sd,end=ed); ft=prepare_features(d5,d30,d1h,d90,d1d); ft=refine_features(ft); m,thr=tune_threshold_and_train(ft)
+    if m is None: print(Fore.YELLOW+f"Model fail {t}."+Style.RESET_ALL); return
+    Xa,prds,pbs=ft.drop(columns=['future_class']).ffill().bfill(),None,None; prds,pbs=m.predict(Xa),m.predict_proba(Xa)
+    dp=ft.copy(); dp['prediction']=prds; trds,ip,di,ep,sp,tp,ets=[],False,None,None,None,None,None
+    for i,r in dp.iterrows():
+        prc=r["Close"]
+        if ip:
+            hs,ht=(prc<=sp) if di=="LONG" else (prc>=sp),(prc>=tp) if di=="LONG" else (prc<=tp)
+            if hs or ht: pnl=(prc-ep)/ep if di=="LONG" else (ep-prc)/ep; trds.append({"entry_timestamp":ets,"exit_timestamp":i,"direction":di,"entry_price":round(ep,2),"exit_price":round(prc,2),"pnl_pct":round(pnl,4),"stop_price":round(sp,2),"target_price":round(tp,2)}); ip=False
+            if ip: continue
+        cl,pb=int(r["prediction"]),pbs[dp.index.get_loc(i)][int(r["prediction"])]
+        if pb<0.60: continue
+        if cl==2 and r.get("Sequoia_long",False): di="LONG"
+        elif cl==0 and r.get("Sequoia_short",False): di="SHORT"
+        else: continue
+        ep,sp,tp,ets,ip=prc,*_build_entry(r,di),i,True
+    if not trds: print(Fore.YELLOW+f"No trades {t}."+Style.RESET_ALL); return
+    tdf,smry=pd.DataFrame(trds),_summarise_performance(pd.DataFrame(trds),len(ft))
+    p=lambda x:f"{x*100:.2f}%"; print(Fore.BLUE+f"\nBacktest {t}"+Style.RESET_ALL+f" ({sd}→{ed}):"); print(f" Trades:{Fore.CYAN}{smry['total']}{Style.RESET_ALL} | WR:{Fore.CYAN}{p(smry['win_rate'])}{Style.RESET_ALL} | AvgP/L:{Fore.CYAN}{p(smry['avg_pnl'])}{Style.RESET_ALL} | Shp:{Fore.CYAN}{smry['sharpe']:.2f}{Style.RESET_ALL} | MDD:{Fore.CYAN}{p(smry['max_dd'])}{Style.RESET_ALL} | TIM:{Fore.CYAN}{p(smry['tim'])}{Style.RESET_ALL}")
+
+def prepare_features_intraday(d30:pd.DataFrame|None=None)->pd.DataFrame:
+    d30=d30.copy(); d30=compute_indicators(d30,'intraday'); d30['AnchoredVWAP_30m']=compute_anchored_vwap(d30,200)
+    if d30.empty or 'Close' not in d30.columns: return pd.DataFrame()
+    dly=to_daily(d30,"intraday"); dly=compute_indicators(dly,'daily'); dly['AnchoredVWAP']=compute_anchored_vwap(dly,252)
+    if dly.index.tz is not None: dly.index=dly.index.tz_localize(None)
+    if d30.index.tz is not None: d30.index=d30.index.tz_localize(None)
+    d30=d30.join(dly.reindex(d30.index,method='ffill'),rsuffix='_daily'); hb,ac=16,'ATR_intraday'
+    if ac not in d30.columns: d30[ac]=d30['Close'].rolling(14).std().fillna(0)
+    u,d,cs,lb=d30['Close']+2*d30[ac],d30['Close']-2*d30[ac],d30['Close'].values,np.ones(len(d30),int)
+    for i in range(len(d30)-hb):
+        w,a,b=cs[i+1:i+1+hb],np.where(cs[i+1:i+1+hb]>=u.iloc[i])[0],np.where(cs[i+1:i+1+hb]<=d.iloc[i])[0]
+        if a.size and b.size: lb[i]=2 if a[0]<b[0] else 0
+        elif a.size: lb[i]=2
+        elif b.size: lb[i]=0
+    d30['future_class']=lb; d30=d30.iloc[:-hb]; return d30
+
+def backtest_strategy_intraday(t,sd,ed,lf=None):
+    _,d30,_,_,_=fetch_data(t,start=sd,end=ed); ft=prepare_features_intraday(d30); ft=refine_features(ft); m,thr=tune_threshold_and_train(ft)
+    if m is None: print(Fore.YELLOW+f"Model fail {t}."+Style.RESET_ALL); return
+    Xa=ft.drop(columns=['future_class']).ffill().bfill(); prds,pbs=m.predict(Xa),m.predict_proba(Xa)
+    dp=ft.copy(); dp['prediction']=prds; trds,ip,di,ep,sp,tp,ets=[],False,None,None,None,None,None
+    for i,r in dp.iterrows():
+        prc=r["Close"]
+        if ip:
+            hs,ht=(prc<=sp) if di=="LONG" else (prc>=sp),(prc>=tp) if di=="LONG" else (prc<=tp)
+            if hs or ht: pnl=(prc-ep)/ep if di=="LONG" else (ep-prc)/ep; trds.append({"entry_timestamp":ets,"exit_timestamp":i,"direction":di,"entry_price":round(ep,2),"exit_price":round(prc,2),"pnl_pct":round(pnl,4),"stop_price":round(sp,2),"target_price":round(tp,2)}); ip=False
+            if ip: continue
+        cl,pb=int(r["prediction"]),pbs[dp.index.get_loc(i)][int(r["prediction"])]
+        if pb<0.60: continue
+        if cl==2 and r.get("Sequoia_long",False): di="LONG"
+        elif cl==0 and r.get("Sequoia_short",False): di="SHORT"
+        else: continue
+        ep,sp,tp,ets,ip=prc,*_build_entry(r,di),i,True
+    if not trds: print(Fore.YELLOW+f"No trades {t} intraday."+Style.RESET_ALL); return
+    tdf,smry=pd.DataFrame(trds),_summarise_performance(pd.DataFrame(trds),len(ft))
+    p=lambda x:f"{x*100:.2f}%"; print(Fore.BLUE+f"\nBacktest {t}"+Style.RESET_ALL+f" ({sd}→{ed}):"); print(f" Trades:{Fore.CYAN}{smry['total']}{Style.RESET_ALL} | WR:{Fore.CYAN}{p(smry['win_rate'])}{Style.RESET_ALL} | AvgP/L:{Fore.CYAN}{p(smry['avg_pnl'])}{Style.RESET_ALL} | Shp:{Fore.CYAN}{smry['sharpe']:.2f}{Style.RESET_ALL} | MDD:{Fore.CYAN}{p(smry['max_dd'])}{Style.RESET_ALL} | TIM:{Fore.CYAN}{p(smry['tim'])}{Style.RESET_ALL}")
+
+def run_signals_on_watchlists(use_intraday:bool=True):
+    all_syms=load_watchlist("long")+load_watchlist("short"); preload_alpaca_interval_cache(all_syms,"60d","30m"); preload_alpaca_interval_cache(all_syms,"380d","1d")
+    _,_,_,_=load_config()
+    for side in ("long","short"):
+        tickers=load_watchlist(side)
+        if not tickers: continue
+        print(f"\n========== {side.upper()} WATCH-LIST ==========")
+        want_dir="LONG" if side=="long" else "SHORT"
         for ticker in tickers:
-            try:
-                df_5m, df_30m, df_1h, df_90m, df_1d = get_or_fetch(ticker)
-            except Exception as e:
-                print(f"{ticker}: data error → {e}")
-                continue
+            try: d5,d30,d1h,d90,d1d=get_or_fetch(ticker)
+            except Exception as e: print(f"{ticker}: data error → {e}"); continue
+            feats=(prepare_features_intraday(d30) if use_intraday else prepare_features(d5,d30,d1h,d90,d1d))
+            feats=refine_features(feats)
+            if feats.empty or 'future_class' not in feats.columns: print(f"{ticker}: no usable rows."); continue
+            model,thr=tune_threshold_and_train(feats)
+            if model is None: print(f"{ticker}: model training failed."); continue
+            latest=feats.drop(columns='future_class').iloc[-1]; sig=generate_signal_output(ticker,latest,model,thr)
+            if sig and (want_dir in sig): print(sig)
 
-            feats = (prepare_features_intraday(df_30m) if use_intraday
-                     else prepare_features(df_5m, df_30m, df_1h,
-                                           df_90m, df_1d))
-            feats = refine_features(feats)
-            if feats.empty or 'future_class' not in feats.columns:
-                print(f"{ticker}: no usable rows.")
-                continue
-
-            model, thr = tune_threshold_and_train(feats)
-            if model is None:
-                print(f"{ticker}: model training failed.")
-                continue
-
-            latest = feats.drop(columns='future_class').iloc[-1]
-            sig    = generate_signal_output(ticker, latest, model, thr, {})
-
-            if sig and (want_dir in sig):
-                print(sig)
-
-def show_signals_since_start_of_week() -> None:
-    """
-    Print every actionable Sequoia signal generated between Monday and today,
-    re-using the on-disk cache so that **no new Yahoo requests** are made.
-    """
-    # 1) Refresh the cache once for every interval (five HTTPS requests total)
-    all_syms = load_watchlist("long") + load_watchlist("short")
-    for period, interval in [
-        ("14d",  "5m"),
-        ("60d",  "30m"),
-        ("120d", "1h"),
-        ("60d",  "90m"),
-        ("380d", "1d")
-    ]:
-        preload_interval_cache(all_syms, period=period, interval=interval)
-
-    # 2) Define date boundaries
-    today   = datetime.datetime.today().replace(hour=0, minute=0,
-                                                second=0, microsecond=0)
-    monday  = today - datetime.timedelta(days=today.weekday())
-    lookback_days = 180
-    train_start = monday - datetime.timedelta(days=lookback_days)
-    start_s, end_s = train_start.strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d")
-
-    # 3) Load the existing trade log
-    cache            = load_predictions()
-    open_by_symbol   = {p["symbol"]: p for p in cache if p["status"] == "Open"}
-
-    # 4) Scan both watch-lists
-    for side in ("long", "short"):
-        tickers = load_watchlist(side)
-        if not tickers:
-            continue
-        print(f"\n==========   {side.upper()} WEEKLY SIGNALS   ==========")
-        want_dir = "LONG" if side == "long" else "SHORT"
-
+def show_signals_since_start_of_week()->None:
+    all_syms=load_watchlist("long")+load_watchlist("short")
+    for p,i in [("14d","5m"),("60d","30m"),("120d","1h"),("60d","2h"),("380d","1d")]: preload_alpaca_interval_cache(all_syms,p,i) # Changed 90m to 2h
+    today,monday=datetime.datetime.today().replace(hour=0,minute=0,second=0,microsecond=0),datetime.datetime.today()-datetime.timedelta(days=datetime.datetime.today().weekday())
+    start_s,end_s=(monday-datetime.timedelta(days=180)).strftime("%Y-%m-%d"),today.strftime("%Y-%m-%d")
+    cache,open_by_symbol=load_predictions(),{p["symbol"]:p for p in load_predictions() if p["status"]=="Open"}
+    for side in ("long","short"):
+        tickers=load_watchlist(side)
+        if not tickers: continue
+        print(f"\n========== {side.upper()} WEEKLY SIGNALS ==========")
+        want_dir="LONG" if side=="long" else "SHORT"
         for ticker in tickers:
             print(f"\n--- {ticker} ---")
-            try:
-                df_5m, df_30m, df_1h, df_90m, df_1d = get_or_fetch(ticker)
-            except Exception as e:
-                print(f"Fetch error {e}")
-                continue
-
-            # Slice the daily frame locally – **no new download**
-            df_1d = df_1d.loc[start_s:end_s]
-
-            feats_all = prepare_features(df_5m, df_30m, df_1h,
-                                         df_90m, df_1d, drop_recent=False)
-            if feats_all.empty:
-                print("No data.")
-                continue
-
-            train_df = refine_features(feats_all.dropna(subset=["future_class"]))
-            if train_df.empty:
-                print("No labels.")
-                continue
-
-            model, thr = tune_threshold_and_train(train_df)
-            if model is None:
-                print("Model training failed.")
-                continue
-
-            feat_cols = [c for c in train_df.columns if c != "future_class"]
-            week_feat = feats_all.loc[monday:today][feat_cols].ffill().bfill()
-
-            open_dir = open_by_symbol.get(ticker, {}).get("direction")
-
-            for dt, row in week_feat.iterrows():
-                sig = generate_signal_output(ticker, row, model, thr)
-                if not sig or (want_dir not in sig):
-                    continue
-
-                # Skip duplicates pointing the same way
-                if open_dir == want_dir:
-                    break
-
+            try: d5,d30,d1h,d90,d1d=get_or_fetch(ticker) # d90 will now be 2h data
+            except Exception as e: print(f"Fetch error {e}"); continue
+            if d1d.empty: print(f"No daily data for {ticker}."); continue
+            d1d_s=d1d.loc[start_s:end_s] if not d1d.loc[start_s:end_s].empty else d1d
+            feats_all=prepare_features(d5,d30,d1h,d90,d1d_s,drop_recent=False) # d90 is 2h
+            if feats_all.empty: print("No data for features."); continue
+            train_df=refine_features(feats_all.dropna(subset=["future_class"]))
+            if train_df.empty: print("No labels for training."); continue
+            model,thr=tune_threshold_and_train(train_df)
+            if model is None: print("Model training failed."); continue
+            feat_cols=[c for c in train_df.columns if c!="future_class"]
+            wf_full=feats_all.loc[monday:today]
+            if wf_full.empty: print(f"No feature data for {ticker} in current week."); continue
+            wf=wf_full[feat_cols].ffill().bfill()
+            if wf.empty: print(f"No feature data for {ticker} after fill in current week."); continue
+            op_dir=open_by_symbol.get(ticker,{}).get("direction")
+            for dt,r in wf.iterrows():
+                sig=generate_signal_output(ticker,r,model,thr)
+                if not sig or (want_dir not in sig): continue
+                if op_dir==want_dir: break
                 print(f"{dt.date()}: {sig}")
-
-                price = float(row["Close"])
-                stop, target = _build_entry(row, want_dir)
-
-                new_rec = {
-                    "symbol": ticker,
-                    "entry_date": dt.strftime("%Y-%m-%d"),
-                    "entry_price": round(price, 2),
-                    "direction": want_dir,
-                    "stop_loss": round(stop, 2),
-                    "profit_target": round(target, 2),
-                    "status": "Open"
-                }
-
-                if open_dir:                          # reverse the old trade
-                    old = open_by_symbol[ticker]
-                    old.update({
-                        "status": "Closed",
-                        "exit_date": dt.strftime("%Y-%m-%d"),
-                        "exit_price": price
-                    })
-
-                open_by_symbol[ticker] = new_rec
-                open_dir = want_dir
-                break                                 # only first signal per week
-
-    closed = [p for p in cache if p["status"] != "Open"]
-    save_predictions(closed + list(open_by_symbol.values()))
+                prc,st,tg=float(r["Close"]),*_build_entry(r,want_dir)
+                nr={"symbol":ticker,"entry_date":dt.strftime("%Y-%m-%d"),"entry_price":round(prc,2),"direction":want_dir,"stop_loss":round(st,2),"profit_target":round(tg,2),"status":"Open"}
+                if op_dir: old=open_by_symbol[ticker]; old.update({"status":"Closed","exit_date":dt.strftime("%Y-%m-%d"),"exit_price":prc})
+                open_by_symbol[ticker],op_dir=nr,want_dir; break
+    save_predictions([p for p in cache if p["status"]!="Open"]+list(open_by_symbol.values()))
 
 def signals_performance_cli():
-    """Dashboard of OPEN trades; uses one batch download to avoid YF rate-limit."""
-    from yfinance.exceptions import YFRateLimitError
-
-    all_recs = load_predictions()
-    open_tr  = [p for p in all_recs if p['status'] == 'Open']
-    if not open_tr:
-        print("No open positions. Run option 5 first.")
+    if ALPACA_API_CLIENT is None:
+        print(Fore.RED + "Alpaca API client not initialized. Cannot show signals performance." + Style.RESET_ALL)
         input("\nPress Enter to return …"); return
 
-    palette = [
-        ('title','white,bold',''), ('headers','light blue,bold',''),
-        ('positive','dark green',''), ('negative','dark red',''),
-        ('hit','white','dark cyan'), ('footer','white,bold','')
-    ]
+    all_recs = load_predictions(); open_tr = [p for p in all_recs if p['status'] == 'Open']
+    if not open_tr: print("No open positions."); input("\nPress Enter..."); return
 
-    header = urwid.AttrMap(urwid.Text(" Weekly Signals – Open Trades", 'center'),'title')
-    footer = urwid.AttrMap(urwid.Text(" (R)efresh  (D)eject hit trades  (Q)uit "),'footer')
-    txt    = urwid.Text("")
-    lay    = urwid.Frame(header=header,
-                         body=urwid.AttrMap(urwid.Filler(txt,'top'),'body'),
-                         footer=footer)
+    palette=[('title','white,bold',''),('headers','light blue,bold',''),('positive','dark green',''),('negative','dark red',''),('hit','white','dark cyan'),('footer','white,bold','')]
+    header=urwid.AttrMap(urwid.Text(" Weekly Signals – Open Trades",align='center'),'title')
+    footer=urwid.AttrMap(urwid.Text(" (R)efresh (D)eject (Q)uit"),'footer')
+    txt,lay=urwid.Text(""),urwid.Frame(header=header,body=urwid.AttrMap(urwid.Filler(txt,'top'),'body'),footer=footer)
 
-    # ── helper: fetch last close prices in **one** request ──────────────
     def get_prices():
         syms = sorted({p['symbol'] for p in open_tr})
-        try:
-            df = yf.download(syms, period='1d', auto_adjust=True, progress=False)['Close']
-            if isinstance(df, pd.Series): df = df.to_frame(syms[0])  # single sym
-            if isinstance(df.columns, pd.MultiIndex):
-                df = df.droplevel(0, axis=1)
-            return df.iloc[-1].to_dict()   # {sym: price}
-        except YFRateLimitError:
-            print(Fore.YELLOW+"Yahoo rate-limit hit; using previous prices."+Style.RESET_ALL)
-            # fallback: use entry_price so P/L = 0
-            return {p['symbol']: p['entry_price'] for p in open_tr}
+        prices = {}
+        if not syms: return prices
+        for sym in syms:
+            try:
+                latest_trade = ALPACA_API_CLIENT.get_latest_trade(sym)
+                prices[sym] = latest_trade.price
+            except Exception as e:
+                entry_price_fallback = next((p_item['entry_price'] for p_item in open_tr if p_item['symbol'] == sym), None)
+                print(Fore.YELLOW + f"Could not fetch latest price for {sym} (dashboard): {e}. Using entry price." + Style.RESET_ALL)
+                prices[sym] = entry_price_fallback if entry_price_fallback is not None else 0
+        return prices
 
-    # ── table builder ──────────────────────────────────────────────────
-    # ── table builder ──────────────────────────────────────────────────
-    def build_table(prices):
-        rows=[('headers',f"{'Symbol':8}{'Dir':6}{'Entry':>10}{'Now':>10}{'P/L%':>8}"
-                          f"{'Stop':>10}{'Target':>10}{'Status':>12}{'Date':>12}\n")]
-        rec_info=[]
-        today=datetime.datetime.today().strftime('%Y-%m-%d')
-
-        for p in open_tr:
-            sym   = p['symbol']
-            now   = float(prices.get(sym, p['entry_price']))
-
-            # -------- correct P/L sign for SHORT vs LONG ----------------
-            if p['direction'] == 'LONG':
-                pnl_pct = (now - p['entry_price']) / p['entry_price'] * 100
-            else:  # SHORT: profit if price DOWN
-                pnl_pct = (p['entry_price'] - now) / p['entry_price'] * 100
-            # ----------------------------------------------------------------
-
-            status, hit = "Open", False
-            if p['direction']=='LONG':
-                if now <= p['stop_loss']:     status, hit = "Stop", True
-                elif now >= p['profit_target']: status, hit = "Target", True
-            else:  # SHORT
-                if now >= p['stop_loss']:     status, hit = "Stop", True
-                elif now <= p['profit_target']: status, hit = "Target", True
-
-            attr = 'hit' if hit else ('positive' if pnl_pct >= 0 else 'negative')
-            rows.append((attr,
-                f"{sym:8}{p['direction']:6}{p['entry_price']:>10.2f}"
-                f"{now:>10.2f}{pnl_pct:>8.2f}%{p['stop_loss']:>10.2f}"
-                f"{p['profit_target']:>10.2f}{status:>12}{p['entry_date']:>12}\n"))
-
-            rec_info.append((p, hit, status, now, pnl_pct, today))
-        return rows, rec_info
-
-
-    # ── first render ───────────────────────────────────────────────────
     rec_cache=[]
     def refresh(*_):
         nonlocal rec_cache
         prices = get_prices()
-        lines, rec_cache = build_table(prices)
-        txt.set_text(lines)
-
+        rows=[('headers',f"{'Symbol':8}{'Dir':6}{'Entry':>10}{'Now':>10}{'P/L%':>8}{'Stop':>10}{'Target':>10}{'Status':>12}{'Date':>12}\n")]
+        rec_info,today_str = [], datetime.datetime.today().strftime('%Y-%m-%d')
+        for p_rec in open_tr:
+            sym,now_prc=p_rec['symbol'],float(prices.get(p_rec['symbol'],p_rec['entry_price']))
+            pnl=((now_prc-p_rec['entry_price'])/p_rec['entry_price']*100) if p_rec['direction']=='LONG' else ((p_rec['entry_price']-now_prc)/p_rec['entry_price']*100)
+            stat,is_hit="Open",False
+            if p_rec['direction']=='LONG':
+                if now_prc<=p_rec['stop_loss']: stat,is_hit="Stop",True
+                elif now_prc>=p_rec['profit_target']: stat,is_hit="Target",True
+            else: # SHORT
+                if now_prc>=p_rec['stop_loss']: stat,is_hit="Stop",True
+                elif now_prc<=p_rec['profit_target']: stat,is_hit="Target",True
+            attr='hit' if is_hit else ('positive' if pnl>=0 else 'negative')
+            rows.append((attr,f"{sym:8}{p_rec['direction']:6}{p_rec['entry_price']:>10.2f}{now_prc:>10.2f}{pnl:>8.2f}%{p_rec['stop_loss']:>10.2f}{p_rec['profit_target']:>10.2f}{stat:>12}{p_rec['entry_date']:>12}\n"))
+            rec_info.append((p_rec,is_hit,stat,now_prc,pnl,today_str))
+        txt.set_text(rows); rec_cache=rec_info
     refresh()
-
-    # ── key-handler ────────────────────────────────────────────────────
     def unhandled(k):
-        nonlocal open_tr, all_recs
+        nonlocal open_tr,all_recs
         if k.lower()=='q': raise urwid.ExitMainLoop()
         if k.lower()=='r': refresh()
         if k.lower()=='d':
             changed=False
-            for p,hit,stat,now,pnl,today in rec_cache:
-                if hit:
-                    p.update({'status':stat,'exit_price':round(now,2),
-                              'exit_date':today,'pnl_pct':round(pnl,2)})
-                    changed=True
+            for p_rec,is_hit,stat,now_prc,pnl,today_s in rec_cache:
+                if is_hit: p_rec.update({'status':stat,'exit_price':round(now_prc,2),'exit_date':today_s,'pnl_pct':round(pnl,2)}); changed=True
             if changed:
-                open_tr=[p for p in open_tr if p['status']=='Open']
-                all_recs=[p for p in all_recs if p['status']!='Open']+open_tr
+                open_tr=[p_ for p_ in open_tr if p_['status']=='Open']
+                all_recs=[p_ for p_ in all_recs if p_['status']!='Open']+open_tr
                 save_predictions(all_recs)
             refresh()
-
-    urwid.MainLoop(lay, palette, unhandled_input=unhandled).run()
-
+    urwid.MainLoop(lay,palette,unhandled_input=unhandled).run()
 
 def closed_stats_cli():
-    """
-    Color-enhanced statistics for CLOSED positions in weekly_signals.json.
-    Green  = favourable numbers, Red = unfavourable.
-    """
-    recs = [p for p in load_predictions() if p['status'] != 'Open']
-    if not recs:
-        print("No closed trades recorded.")
-        input("\nPress Enter to return …")
-        return
+    recs=[p for p in load_predictions() if p['status']!='Open']
+    if not recs: print("No closed trades."); input("\nPress Enter..."); return
+    for r_item in recs:
+        if 'pnl_pct' not in r_item or r_item['pnl_pct'] is None:
+            ep,xp=r_item['entry_price'],r_item.get('exit_price',r_item['entry_price'])
+            r_item['pnl_pct']=round(((xp-ep)/ep*100) if r_item['direction']=='LONG' else ((ep-xp)/ep*100),2)
 
-    # ── compute P/L % for every record (in case older JSON lacks it) ──
-    for r in recs:
-        if 'pnl_pct' not in r or r['pnl_pct'] is None:
-            ep, xp = r['entry_price'], r.get('exit_price', r['entry_price'])
-            if r['direction'] == 'LONG':
-                r['pnl_pct'] = (xp - ep) / ep * 100
-            else:                              # SHORT
-                r['pnl_pct'] = (ep - xp) / ep * 100
-            r['pnl_pct'] = round(r['pnl_pct'], 2)
+    wins,losses,total=[r for r in recs if r['status']=='Target'],[r for r in recs if r['status'] in ('Stop','Closed')],len(recs)
+    win_rt=(len(wins)/total*100 if total else 0)
+    avg_win,avg_los=(np.mean([w['pnl_pct'] for w in wins]) if wins else 0.0),(np.mean([l['pnl_pct'] for l in losses]) if losses else 0.0)
+    equity,tot_ret=1.0,0.0
+    for r_item in recs: equity*= (1+r_item['pnl_pct']/100)
+    tot_ret=(equity-1)*100
 
-    wins   = [r for r in recs if r['status'] == 'Target']
-    losses = [r for r in recs if r['status'] in ('Stop', 'Closed')]
-    total  = len(recs)
-    win_rt = len(wins) / total * 100
+    g,r_color,b=lambda s:Fore.GREEN+s+Style.RESET_ALL,lambda s:Fore.RED+s+Style.RESET_ALL,lambda s:Fore.CYAN+s+Style.RESET_ALL
 
-    avg_win = np.mean([w['pnl_pct'] for w in wins])   if wins   else 0.0
-    avg_los = np.mean([l['pnl_pct'] for l in losses]) if losses else 0.0
+    print(b("\nClosed Stats")); print(b("----------"))
+    print(f"Trades:{b(str(total))} | Wins:{g(str(len(wins)))}({g(f'{avg_win:+.2f}%')}) | Losses:{r_color(str(len(losses)))}({r_color(f'{avg_los:+.2f}%')})")
+    print(f"Win Rate:{(g if win_rt>=50 else r_color)(f'{win_rt:.2f}%')} | Total Return:{(g if tot_ret>=0 else r_color)(f'{tot_ret:+.2f}%')}")
 
-    # compounded equity curve
-    equity = 1.0
-    for r in recs: equity *= 1 + r['pnl_pct'] / 100
-    tot_ret = (equity - 1) * 100
-
-    # ── colour helpers ──
-    g = lambda s: Fore.GREEN + s + Style.RESET_ALL
-    r = lambda s: Fore.RED   + s + Style.RESET_ALL
-    b = lambda s: Fore.CYAN  + s + Style.RESET_ALL   # headings
-
-    print(b("\nClosed-Position Statistics"))
-    print(b("--------------------------------"))
-
-    print(f"Total closed trades   : {b(str(total))}")
-    print(f"Wins (hit target)     : {g(str(len(wins)) if wins else '0')}"
-          f"  |  Avg gain : {g(f'{avg_win:+.2f}%') if wins else '--'}")
-    print(f"Losses / switches     : {r(str(len(losses)) if losses else '0')}"
-          f"  |  Avg loss : {r(f'{avg_los:+.2f}%') if losses else '--'}")
-
-    win_color = g if win_rt >= 50 else r
-    print(f"Win rate              : {win_color(f'{win_rt:.2f}%')}")
-
-    tot_color = g if tot_ret >= 0 else r
-    print(f"Compounded return     : {tot_color(f'{tot_ret:+.2f}%')}")
-
-    # ── last 10 rows table ──
-    print(b("\nMost recent 10 closed trades:"))
+    print(b("\nRecent 10:"))
     for rcd in recs[-10:]:
-        pl_col = g if rcd['pnl_pct'] >= 0 else r
-        print(f"{rcd['exit_date']}  {rcd['symbol']:5}  {rcd['direction']:5} "
-              f"{rcd['status']:6}  PnL {pl_col(f'{rcd['pnl_pct']:+6.2f}%')}")
+        pnl_color = g if rcd['pnl_pct'] >= 0 else r_color
+        print(f"{rcd['exit_date']} {rcd['symbol']:5} {rcd['direction']:5} {rcd['status']:6} PnL {pnl_color(f'{rcd["pnl_pct"]:+6.2f}%')}")
 
-    # ── clear option ──
-    if input(Fore.YELLOW + "\n(C)lear stats or Enter to return: " + Style.RESET_ALL).lower() == 'c':
-        save_predictions([p for p in load_predictions() if p['status'] == 'Open'])
-        print(Fore.YELLOW + "History cleared." + Style.RESET_ALL)
-        input("\nPress Enter to return …")
+    if input(Fore.YELLOW+"\n(C)lear or Enter: "+Style.RESET_ALL).lower()=='c':
+        save_predictions([p for p in load_predictions() if p['status']=='Open'])
+        print(Fore.YELLOW+"History cleared."+Style.RESET_ALL)
+    input("\nPress Enter...")
 
 
-def run_signals_for_watchlist(side: str, use_intraday: bool = True):
-    """
-    Generate signals **only** of the correct direction for the requested list.
-      side = 'long'  → look for LONG signals
-      side = 'short' → look for SHORT signals
-    """
-    fred_api_key = load_config()
-    tickers = load_watchlist(side)
-    if not tickers:
-        print(f"{side.capitalize()} watch-list is empty.")
-        return
-
-    today       = datetime.datetime.today()
+def run_signals_for_watchlist(side:str,use_intraday:bool=True):
+    _,_,_,_=load_config(); tickers=load_watchlist(side)
+    if not tickers: print(f"{side.capitalize()} watch-list empty."); return
     for ticker in tickers:
         print(f"\n=== {ticker} ({side}) ===")
-        df_5m, df_30m, df_1h, df_90m, df_1d = get_or_fetch(ticker)
-
-        # build feature set ------------------------------------------------
-        feats = (prepare_features_intraday(df_30m) if use_intraday
-                 else prepare_features(df_5m, df_30m, df_1h,
-                                       df_90m, df_1d))
-        feats = refine_features(feats)
-        if feats.empty or 'future_class' not in feats.columns:
-            print("No valid data.")
-            continue
-
-        model, thr = tune_threshold_and_train(feats)
-        if model is None:
-            print("Model training failed.")
-            continue
-
-        latest = feats.drop(columns='future_class').iloc[-1]
-        sig    = generate_signal_output(ticker, latest, model, thr, {})
-
-        # ensure direction matches list -----------------------------------
-        if sig and side.upper() in sig:
-            print(sig)
+        d5,d30,d1h,d90,d1d=get_or_fetch(ticker)
+        feats=(prepare_features_intraday(d30) if use_intraday else prepare_features(d5,d30,d1h,d90,d1d))
+        feats=refine_features(feats)
+        if feats.empty or 'future_class' not in feats.columns: print("No valid data."); continue
+        model,thr=tune_threshold_and_train(feats)
+        if model is None: print("Model training failed."); continue
+        latest=feats.drop(columns='future_class').iloc[-1]; sig=generate_signal_output(ticker,latest,model,thr)
+        if sig and side.upper() in sig: print(sig)
 
 def interactive_menu():
+    if ALPACA_API_CLIENT is None: _,key,sec,url=load_config(); initialize_alpaca_client(key,sec,url)
     while True:
-        print("\nMain Menu:")
-        print("1. Manage Watch-lists")
-        print("2. Run Signals on BOTH Watch-lists (live)")
-        print("3. Show Signals Since Start of Week")
-        print("4. Backtest ALL Watch-lists")
-        print("5. Show Latest Signals Performance")   
-        print("6. Closed-Trades Statistics")          
-        print("0. Exit")
-        choice = input("Select an option: ").strip()
-
-        if choice == '0':
-            print("Exiting."); break
-
-        elif choice == '1':
-            manage_watchlist()
-
-        elif choice == '2':
-            run_signals_on_watchlists(use_intraday=True)
-
-        elif choice == '3':
-            show_signals_since_start_of_week()
-
-        elif choice == '4':
-            backtest_watchlist()
-
-        elif choice == '5':                    
-            _update_positions_status()
-            signals_performance_cli()
-
-        elif choice == '6':                     
-            closed_stats_cli()
-
-        else:
-            print("Invalid option.")
-
+        print("\nMain Menu:\n1.Manage WL\n2.Run Signals\n3.Weekly Signals\n4.Backtest WLs\n5.Open Pos Perf\n6.Closed Stats\n0.Exit")
+        ch=input("Select:").strip()
+        if ch=='0': print("Exiting."); break
+        elif ch=='1': manage_watchlist()
+        elif ch=='2': run_signals_on_watchlists(True)
+        elif ch=='3': show_signals_since_start_of_week()
+        elif ch=='4': print("Backtest WLs (NIY)")
+        elif ch=='5': _update_positions_status(); signals_performance_cli()
+        elif ch=='6': closed_stats_cli()
+        else: print("Invalid.")
 
 def main():
-    parser = argparse.ArgumentParser(description="Swing trading signal generator/backtester")
-    parser.add_argument('tickers', nargs='*', help="List of stock ticker symbols to analyze")
-    parser.add_argument('--log', action='store_true', help="Optionally log selected trades to a file")
-    parser.add_argument('--backtest', action='store_true', help="Run in backtest mode instead of live signal mode")
-    parser.add_argument('--start', default=None, help="Start date for backtest (YYYY-MM-DD)")
-    parser.add_argument('--end', default=None, help="End date for backtest (YYYY-MM-DD)")
-    parser.add_argument('--real', action='store_true', help="Use 30-min intraday backtest for max realism")
-    parser.add_argument('--live-real', action='store_true',
-                        help="Use 30-min intraday pipeline in live mode")
-    args = parser.parse_args()
+    p=argparse.ArgumentParser(description="Signal generator/backtester")
+    p.add_argument('tickers',nargs='*',help="Ticker symbols")
+    p.add_argument('--log',action='store_true',help="Log trades")
+    p.add_argument('--backtest',action='store_true',help="Backtest mode")
+    p.add_argument('--start',default=None,help="Backtest start (YYYY-MM-DD)")
+    p.add_argument('--end',default=None,help="Backtest end (YYYY-MM-DD)")
+    p.add_argument('--real',action='store_true',help="30-min intraday backtest")
+    p.add_argument('--live-real',action='store_true',help="30-min intraday live")
+    a=p.parse_args()
+    if not a.tickers and not any([a.log,a.backtest,a.start,a.end,a.real,a.live_real]): interactive_menu(); return
+    _,key,sec,url=load_config(); initialize_alpaca_client(key,sec,url)
+    ts,lt,rb,sa,ea,ui=a.tickers,a.log,a.backtest,a.start,a.end,a.real
+    lf=open("trades_log.csv","a") if lt else None
+    if rb and sa and ea:
+        preload_alpaca_interval_cache(ts,"60d","30m"); preload_alpaca_interval_cache(ts,"380d","1d") # Preload for 30m and 1d
+        # Also preload for 2h if it's going to be used by '90m' key via intervals in fetch_data
+        preload_alpaca_interval_cache(ts,"120d","2h")
 
-    # If no positional tickers and no flags set, go interactive:
-    if not args.tickers and not any(vars(args).values()):
-        interactive_menu()
+
+        for t in ts:
+            fs=f"30m_{sa}_{ea}.csv" if ui else f"{sa}_{ea}.csv"; fn=f"{t}_{fs}"
+            with open(fn,"a") as lfl: print(f"\n=== {'Intraday ' if ui else ''}Backtesting {t} {sa}→{ea} ==="); (backtest_strategy_intraday if ui else backtest_strategy)(t,sa,ea,log_file=lfl)
+        if lf: lf.close() # Corrected indentation
         return
-
-    fred_api_key = load_config()
-    tickers      = args.tickers
-    log_trades   = args.log
-    run_backtest = args.backtest
-    start_arg    = args.start
-    end_arg      = args.end
-    use_intraday = args.real
-
-    log_file = open("trades_log.csv", "a") if log_trades else None
-
-    # --------------------------- BACK-TEST MODE ---------------------------
-    if run_backtest and start_arg and end_arg:
-
-        # ---- NEW: one bulk cache warm-up for all requested symbols ----
-        preload_interval_cache(tickers, period="60d",  interval="30m")
-        preload_interval_cache(tickers, period="380d", interval="1d")
-        # ----------------------------------------------------------------
-
-        if use_intraday:
-            for ticker in tickers:
-                fname = f"{ticker}_30m_{start_arg}_{end_arg}.csv"
-                with open(fname, "a") as lf:
-                    print(f"\n=== Intraday Backtesting {ticker} (30m) {start_arg} → {end_arg} ===")
-                    backtest_strategy_intraday(ticker, start_arg, end_arg, log_file=lf)
-        else:
-            for ticker in tickers:
-                fname = f"{ticker}_{start_arg}_{end_arg}.csv"
-                with open(fname, "a") as lf:
-                    print(f"\n=== Backtesting {ticker} {start_arg} → {end_arg} ===")
-                    backtest_strategy(ticker, start_arg, end_arg,  log_file=lf)
-
-        if log_file: log_file.close()
-        return
-
-    # --------------------------- LIVE MODE (unchanged) -------------------
-    today       = datetime.datetime.today()
-
-    for ticker in tickers:
-        print(f"\n=== Processing {ticker} (live signal mode) ===")
+    uil=a.live_real
+    for t in ts:
+        print(f"\n=== Processing {t} (live{' intraday' if uil else ''}) ===")
         try:
-            df_5m, df_30m, df_1h, df_90m, df_1d = get_or_fetch(ticker)
-        except Exception as e:
-            print(f"Error fetching data for {ticker}: {e}")
-            continue
+            fetched_data = get_or_fetch(t)
+            if isinstance(fetched_data, tuple) and len(fetched_data) == 5:
+                d5,d30,d1h,d90,d1d = fetched_data
+            else:
+                print(f"Data fetch error for {t}: get_or_fetch did not return 5 DataFrames."); continue
+        except Exception as e: print(f"Data fetch error {t}: {e}"); continue
+        fts=None
+        if uil:
+            if not d30.empty: fts=prepare_features_intraday(d30)
+            else: print(f"No 30m data {t} live intraday."); continue
+        else:
+            if not d1d.empty: fts=prepare_features(d5,d30,d1h,d90,d1d) # d90 is 2h data here
+            else: print(f"No daily data {t} live daily."); continue
+        if fts.empty: print(f"Insufficient data for features: {t}"); continue
+        fts=refine_features(fts)
+        if fts.empty or 'future_class' not in fts.columns: print(f"No features after refinement: {t}"); continue
+        m,thr=tune_threshold_and_train(fts)
+        if m is None: print(f"Model training failed: {t}."); continue
+        lr=fts.drop(columns='future_class').iloc[-1]; sig=generate_signal_output(t,lr,m,thr)
+        if sig: print(sig)
+        else: print(f"No signal for {t}.")
+        if lf and sig: lf.write(f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')},{t},{sig}\n"); lf.flush()
+    if lf: lf.close()
 
-        if df_1d.empty or 'Close' not in df_1d.columns:
-            print("No usable daily data, skipping.")
-            continue
-
-        feat = prepare_features(df_5m, df_30m, df_1h, df_90m, df_1d)
-        if feat.empty:
-            print("Insufficient data, skipping.")
-            continue
-
-        feat = refine_features(feat)
-        if feat.empty or 'future_class' not in feat.columns:
-            continue
-
-        model, thr = tune_threshold_and_train(feat)
-        if model is None:
-            print("Model training failed.")
-            continue
-
-        latest_row = feat.drop(columns='future_class').iloc[-1]
-        sig = generate_signal_output(ticker, latest_row, model, thr, {})
-        print(sig)
-
-        if log_file and sig:
-            now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            log_file.write(f"{now},{ticker},{sig}\n")
-            log_file.flush()
-
-    if log_file: log_file.close()
-
-
-
-if __name__ == "__main__":
+if __name__=="__main__":
     main()
+
+[end of Sequoia/axist-tos.py]
