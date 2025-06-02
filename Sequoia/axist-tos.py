@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 
 
 import os
@@ -41,7 +41,7 @@ warnings.filterwarnings(
 )
 
 PREDICTIONS_FILE = "weekly_signals.json"
-DATA_CACHE: dict[tuple, tuple] = {}      # key → (df_5m, df_30m, df_1h, df_90m, df_1d)
+DATA_CACHE: dict[tuple, tuple] = {}      # key → (df_5m, df_30m, df_1h, df_2h, df_1d)
 ALPACA_API_CLIENT = None
 
 ALPACA_TIMEFRAME_MAP = {
@@ -170,7 +170,7 @@ def fetch_data(ticker,start=None,end=None,intervals=None,warmup_days=300):
     if intervals is None:
         intervals={
             '5m':('14d','5m'), '30m':('60d','30m'), '1h':('120d','1h'),
-            '90m':('120d','2h'), # Changed to fetch 2h data directly
+            '2h':('120d','2h'), # Changed to fetch 2h data directly
             '1d':('380d','1d')
         }
     dfs,eval_time_utc={},datetime.datetime.now(datetime.timezone.utc)
@@ -184,9 +184,9 @@ def fetch_data(ticker,start=None,end=None,intervals=None,warmup_days=300):
         start_iso,end_iso=(current_start_dt.replace(tzinfo=datetime.timezone.utc) if current_start_dt.tzinfo is None else current_start_dt).isoformat(), (current_end_dt.replace(tzinfo=datetime.timezone.utc) if current_end_dt.tzinfo is None else current_end_dt).isoformat()
 
         df=_alpaca_download_cached(ticker,alpaca_tf_for_fetch,start_iso,end_iso)
-        dfs[key]=df # Assign directly, no special resampling for '90m' here
+        dfs[key]=df # Assign directly, no special resampling for '2h' here
 
-    return (dfs.get(k,pd.DataFrame()) for k in ['5m','30m','1h','90m','1d'])
+    return (dfs.get(k,pd.DataFrame()) for k in ['5m','30m','1h','2h','1d'])
 
 def compute_indicators(df:pd.DataFrame,timeframe:str="daily")->pd.DataFrame:
     df=df.copy(); req={"Open","High","Low","Close","Volume"}
@@ -212,15 +212,15 @@ def to_daily(intra_df,label):
     if intra_df.empty: return pd.DataFrame()
     daily_data=intra_df.groupby(intra_df.index.date).tail(1); daily_data.index=pd.to_datetime(daily_data.index.date); daily_data.index.name='Date'; return daily_data
 
-def prepare_features(df_5m:pd.DataFrame,df_30m:pd.DataFrame,df_1h:pd.DataFrame,df_90m:pd.DataFrame,df_1d:pd.DataFrame,*,horizon:int=10,drop_recent:bool=True)->pd.DataFrame:
-    inds=[compute_indicators(df.copy(),lbl) for df,lbl in zip([df_5m,df_30m,df_1h,df_90m,df_1d],['5m','30m','hourly','90m','daily'])]
+def prepare_features(df_5m:pd.DataFrame,df_30m:pd.DataFrame,df_1h:pd.DataFrame,df_2h:pd.DataFrame,df_1d:pd.DataFrame,*,horizon:int=10,drop_recent:bool=True)->pd.DataFrame:
+    inds=[compute_indicators(df.copy(),lbl) for df,lbl in zip([df_5m,df_30m,df_1h,df_2h,df_1d],['5m','30m','hourly','2h','daily'])]
     inds[0]['AnchoredVWAP_5m']=compute_anchored_vwap(inds[0],2000)
     inds[1]['AnchoredVWAP_30m']=compute_anchored_vwap(inds[1],200)
     inds[2]['AnchoredVWAP_1h']=compute_anchored_vwap(inds[2],120)
     ind_1d=inds[4]; ind_1d['AnchoredVWAP']=compute_anchored_vwap(ind_1d,252)
-    dailies=[to_daily(i,lbl) for i,lbl in zip(inds[:-1],['5m','30m','hourly','90m'])]
+    dailies=[to_daily(i,lbl) for i,lbl in zip(inds[:-1],['5m','30m','hourly','2h'])]
     features_df=ind_1d
-    for daily_df, suffix in zip(dailies, ['_5m', '_30m', '_1h', '_90m']):
+    for daily_df, suffix in zip(dailies, ['_5m', '_30m', '_1h', '_2h']):
         features_df = features_df.join(daily_df, rsuffix=suffix)
     features_df.dropna(subset=['Close'],inplace=True)
     if features_df.empty: return features_df
@@ -368,7 +368,7 @@ def run_signals_on_watchlists(use_intraday:bool=True):
 
 def show_signals_since_start_of_week()->None:
     all_syms=load_watchlist("long")+load_watchlist("short")
-    for p,i in [("14d","5m"),("60d","30m"),("120d","1h"),("60d","2h"),("380d","1d")]: preload_alpaca_interval_cache(all_syms,p,i) # Changed 90m to 2h
+    for p,i in [("14d","5m"),("60d","30m"),("120d","1h"),("60d","2h"),("380d","1d")]: preload_alpaca_interval_cache(all_syms,p,i) # Changed 2h to 2h
     today,monday=datetime.datetime.today().replace(hour=0,minute=0,second=0,microsecond=0),datetime.datetime.today()-datetime.timedelta(days=datetime.datetime.today().weekday())
     start_s,end_s=(monday-datetime.timedelta(days=180)).strftime("%Y-%m-%d"),today.strftime("%Y-%m-%d")
     cache,open_by_symbol=load_predictions(),{p["symbol"]:p for p in load_predictions() if p["status"]=="Open"}
@@ -545,7 +545,7 @@ def main():
     lf=open("trades_log.csv","a") if lt else None
     if rb and sa and ea:
         preload_alpaca_interval_cache(ts,"60d","30m"); preload_alpaca_interval_cache(ts,"380d","1d") # Preload for 30m and 1d
-        # Also preload for 2h if it's going to be used by '90m' key via intervals in fetch_data
+        # Also preload for 2h if it's going to be used by '2h' key via intervals in fetch_data
         preload_alpaca_interval_cache(ts,"120d","2h")
 
 
