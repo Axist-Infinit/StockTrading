@@ -12,9 +12,9 @@ SPXL / SPXS – Intraday-Reversal Model (XGBoost)
 • Risk: 1 % of equity, stop = 0.35 % or 1×ATR, TP = 0.60 %
 • Works as:  (i) trainer / back-tester,  (ii) live decision engine
 """
-import argparse, datetime as dt, os, pickle, sys, time
+import argparse, datetime as dt, os, pickle, time
 from typing import List, Tuple
-from collections import defaultdict
+# Removed: sys, collections.defaultdict
 
 import numpy as np
 import pandas as pd
@@ -79,46 +79,64 @@ def train_ensemble(X_train, y_train, X_val, y_val, seq_len: int = 12, feature_co
     For Stockformer we build 3-d tensor (samples × seq_len × features)
     Assumes X_train is sorted chronologically so rolling windows work.
     """
-    # Ensure necessary libraries are available (already imported at script level)
     import numpy as np
-    import pandas as pd # Though not explicitly used in this version, good to have if X_train were df
-    import torch
-    import torch.nn as nn
-    import xgboost as xgb
-    from lightgbm import LGBMClassifier
-    # Stockformer class, LogisticRegression
-    # are assumed to be available from global imports / definitions.
+    # import pandas as pd # Not strictly needed here with numpy inputs
+
+    # Conditional imports for model training
+    _xgb = None
+    _LGBMClassifier = None
+    _torch = None
+    _nn = None
+
+    try: import xgboost as xgb; _xgb = xgb
+    except ImportError: print("XGBoost (xgb) not found. Will skip.")
+    try: from lightgbm import LGBMClassifier; _LGBMClassifier = LGBMClassifier
+    except ImportError: print("LightGBM (LGBMClassifier) not found. Will skip.")
+    try: import torch; _torch = torch
+    except ImportError: print("PyTorch (torch) not found. Will skip Stockformer.")
+    # nn might fail even if torch is present, if torch.nn is somehow not part of the installation
+    if _torch:
+        try: import torch.nn as nn; _nn = nn
+        except ImportError: print("PyTorch (torch.nn) not found. Will skip Stockformer.")
+
+    # Stockformer class and LogisticRegression are assumed to be available from global imports / definitions.
 
     models = {}
 
     # ---- XGBoost -------------------------------------------------------------
-    # print("Training XGBoost for ensemble...") # Optional: for verbosity
-    try:
-        xgb_params = dict(n_estimators=400, max_depth=6, learning_rate=0.05,
-                          subsample=0.8, colsample_bytree=0.8,
-                          objective="binary:logistic", eval_metric="logloss",
-                          n_jobs=-1, random_state=42) # Added random_state for reproducibility
-        xgb_clf = xgb.XGBClassifier(**xgb_params)
-        xgb_clf.fit(X_train, y_train) # Assumes X_train is a NumPy array or compatible
-        models["xgb"] = xgb_clf
-    except NameError: # xgb not imported due to missing package
-        print("XGBoost not available. Skipping XGBoost training.")
+    if _xgb:
+        try:
+            xgb_params = dict(n_estimators=400, max_depth=6, learning_rate=0.05,
+                              subsample=0.8, colsample_bytree=0.8,
+                              objective="binary:logistic", eval_metric="logloss",
+                              n_jobs=-1, random_state=42)
+            xgb_clf = _xgb.XGBClassifier(**xgb_params)
+            xgb_clf.fit(X_train, y_train)
+            models["xgb"] = xgb_clf
+        except Exception as e: # Catch any error during XGBoost model init or fit
+            print(f"Error during XGBoost training: {e}. Skipping XGBoost.")
+            models["xgb"] = None
+    else:
+        # This message is now redundant due to the import message, but kept for clarity if _xgb is None for other reasons
+        print("XGBoost not available (import failed or _xgb not set). Skipping XGBoost training.")
         models["xgb"] = None
-    # print("XGBoost training complete.")
 
     # ---- LightGBM ------------------------------------------------------------
-    # print("Training LightGBM for ensemble...")
-    try:
-        lgb_params = dict(n_estimators=500, num_leaves=64,
-                          learning_rate=0.05, subsample=0.8,
-                          colsample_bytree=0.8, objective="binary", random_state=42) # Added random_state
-        lgb_clf = LGBMClassifier(**lgb_params)
-        lgb_clf.fit(X_train, y_train) # Assumes X_train is a NumPy array or compatible
-        models["lgb"] = lgb_clf
-    except NameError: # LGBMClassifier not imported
-        print("LightGBM not available. Skipping LightGBM training.")
+    if _LGBMClassifier:
+        try:
+            lgb_params = dict(n_estimators=500, num_leaves=64,
+                              learning_rate=0.05, subsample=0.8,
+                              colsample_bytree=0.8, objective="binary", random_state=42)
+            lgb_clf = _LGBMClassifier(**lgb_params)
+            lgb_clf.fit(X_train, y_train)
+            models["lgb"] = lgb_clf
+        except Exception as e: # Catch any error during LightGBM model init or fit
+            print(f"Error during LightGBM training: {e}. Skipping LightGBM.")
+            models["lgb"] = None
+    else:
+        # Redundant message similar to XGBoost's
+        print("LightGBM not available (import failed or _LGBMClassifier not set). Skipping LightGBM training.")
         models["lgb"] = None
-    # print("LightGBM training complete.")
 
     # ---- Stockformer ---------------------------------------------------------
     # print("Training Stockformer for ensemble...")
@@ -134,67 +152,80 @@ def train_ensemble(X_train, y_train, X_val, y_val, seq_len: int = 12, feature_co
 
 
     # Inner function to create sequences for Stockformer
+    # Example:
+    # If X_numpy_array is (5 samples, 2 features) and seq_len = 3:
+    #   [[1,10], [2,20], [3,30], [4,40], [5,50]]
+    # Output will be a tensor of shape (3, 3, 2):
+    #   [[[1,10], [2,20], [3,30]],  # Sequence 1
+    #    [[2,20], [3,30], [4,40]],  # Sequence 2
+    #    [[3,30], [4,40], [5,50]]]  # Sequence 3
     def make_tensor(X_numpy_array): # X_numpy_array must be a 2D numpy array
-        import torch # Ensure torch is available in this scope
+        # Uses _torch from outer scope if available
+        if not _torch:
+            # This function should not be called if _torch is None, but as a safeguard:
+            raise ImportError("make_tensor requires torch to be imported and available.")
         xs_list = []
-        # Start from seq_len-1 to create the first sequence X[0:seq_len]
-        # Loop up to len(X_numpy_array) - 1 to get the last sequence X[end-seq_len:end]
-        # The target for X[idx-seq_len:idx] is y[idx-1]
         current_n_feat = X_numpy_array.shape[1] if X_numpy_array.ndim > 1 else 0
         for idx in range(seq_len, len(X_numpy_array) + 1): # Corrected loop range
-            window = X_numpy_array[idx-seq_len:idx, :] # Ensure slicing is correct for 2D array
-            xs_list.append(torch.tensor(window, dtype=torch.float32))
-        if not xs_list: # Handle case where X_numpy_array is too short
-            return torch.empty((0, seq_len, current_n_feat), dtype=torch.float32)
-        return torch.stack(xs_list)
+            window = X_numpy_array[idx-seq_len:idx, :]
+            xs_list.append(_torch.tensor(window, dtype=_torch.float32))
+        if not xs_list:
+            return _torch.empty((0, seq_len, current_n_feat), dtype=_torch.float32)
+        return _torch.stack(xs_list)
 
-    if 'torch' not in globals() and 'torch' not in locals(): # Check if torch was loaded
-        print("PyTorch not available. Skipping Stockformer training.")
+    Xs_train_tensor = None # Initialize
+    if not _torch or not _nn or 'Stockformer' not in globals():
+        # This condition checks if torch, torch.nn were successfully imported via _torch, _nn
+        # and if Stockformer class definition was successful (it might not be if torch.nn was missing at class def time)
+        print("PyTorch, torch.nn or Stockformer class not available. Skipping Stockformer training.")
         models["stk"] = None
-        Xs_train_tensor = None # Ensure it's defined
     elif n_feat == 0:
         print("Stockformer training skipped: X_train has no features.")
         models["stk"] = None
-        Xs_train_tensor = None
     else:
-        Xs_train_tensor = make_tensor(X_train_values)
+        try:
+            # Attempt to create tensor sequences
+            Xs_train_tensor = make_tensor(X_train_values) # make_tensor uses _torch from train_ensemble scope
 
-    # Align y_train: target for sequence X[idx-seq_len:idx] is y[idx-1]
-    # So, if make_tensor creates sequences ending at original indices k (from seq_len-1 to len-1),
-    # the y_train should be y[seq_len-1 : len(y_train)]
-    # Number of samples in Xs_train_tensor is len(X_train_values) - seq_len + 1
-    if Xs_train_tensor is not None:
-        num_stockformer_samples = Xs_train_tensor.shape[0]
-
-        if num_stockformer_samples == 0:
-            print("Stockformer training skipped: no valid training sequences generated (X_train too short).")
-            models["stk"] = None # Mark as not trained
-        else:
-            # y_train needs to be sliced from (seq_len-1) up to (seq_len-1 + num_stockformer_samples)
-            y_stockformer_train = torch.tensor(y_train[seq_len-1 : seq_len-1 + num_stockformer_samples],
-                                               dtype=torch.float32).view(-1,1)
-
-            if Xs_train_tensor.shape[0] != y_stockformer_train.shape[0]:
-                 print(f"Shape mismatch! Xs_train_tensor: {Xs_train_tensor.shape}, y_stockformer_train: {y_stockformer_train.shape}. Skipping Stockformer.")
-                 models["stk"] = None
+            if Xs_train_tensor.shape[0] == 0: # No sequences generated
+                print("Stockformer training skipped: no valid training sequences generated (X_train too short).")
+                models["stk"] = None
             else:
-                net = Stockformer(n_feat, seq_len) # Stockformer class must be defined
-                loss_fn = nn.BCELoss()
-                optim_ = torch.optim.Adam(net.parameters(), lr=1e-3)
+                num_stockformer_samples = Xs_train_tensor.shape[0]
+                # Align y_train for Stockformer
+                # Ensure y_train has enough samples after slicing for seq_len adjustment
+                if len(y_train) >= seq_len -1 + num_stockformer_samples:
+                    y_stockformer_train = _torch.tensor(y_train[seq_len-1 : seq_len-1 + num_stockformer_samples],
+                                                       dtype=_torch.float32).view(-1,1)
 
-                net.train()
-                for epoch in range(5): # Small epoch count for demo
-                    optim_.zero_grad()
-                    preds_stk = net(Xs_train_tensor)
-                    loss = loss_fn(preds_stk, y_stockformer_train)
-                    loss.backward()
-                    optim_.step()
-                    # print(f"Stockformer Epoch {epoch+1}/5, Loss: {loss.item():.4f}") # Optional
-                models["stk"] = net.eval()
-                # print("Stockformer training complete.")
-    else: # Xs_train_tensor is None (e.g. PyTorch not available)
-        models["stk"] = None
+                    if Xs_train_tensor.shape[0] != y_stockformer_train.shape[0]:
+                        print(f"Shape mismatch! Xs_train_tensor: {Xs_train_tensor.shape}, y_stockformer_train: {y_stockformer_train.shape}. Skipping Stockformer.")
+                        models["stk"] = None
+                    else:
+                        # Stockformer instantiation and training
+                        # Stockformer class itself imports torch and torch.nn internally.
+                        # If those imports fail within Stockformer, it will raise an error there.
+                        if _torch: # Set seed for reproducibility if torch is available
+                            _torch.manual_seed(42)
+                        net = Stockformer(n_feat, seq_len) # Uses torch, nn imported by Stockformer
+                        loss_fn = _nn.BCELoss() # Uses _nn from the top of train_ensemble
+                        optim_ = _torch.optim.Adam(net.parameters(), lr=1e-3) # Uses _torch
 
+                        net.train()
+                        for epoch in range(5): # Small epoch count for demo
+                            optim_.zero_grad()
+                            preds_stk = net(Xs_train_tensor)
+                            loss = loss_fn(preds_stk, y_stockformer_train)
+                            loss.backward()
+                            optim_.step()
+                        models["stk"] = net.eval()
+                else:
+                    print(f"Stockformer training skipped: y_train too short for aligned labels (need {seq_len - 1 + num_stockformer_samples}, got {len(y_train)}).")
+                    models["stk"] = None
+        except (ImportError, NameError, AttributeError, RuntimeError) as e: # Catch issues from make_tensor or Stockformer
+            print(f"Stockformer training failed due to error: {e}. Skipping.")
+            models["stk"] = None
+            # Xs_train_tensor = None # Already initialized to None, ensure it remains so if error
 
     # ---- Meta-learner --------------------------------------------------------
     # print("Training meta-learner...")
@@ -206,35 +237,55 @@ def train_ensemble(X_train, y_train, X_val, y_val, seq_len: int = 12, feature_co
     if models.get("xgb"):
         xgb_meta_preds = models["xgb"].predict_proba(X_val)[:,1]
 
-    lgb_meta_preds = np.array([0.5] * len(X_val)) # Default if model not available
+    lgb_meta_preds = np.array([0.5] * len(X_val))
     if models.get("lgb"):
         lgb_meta_preds = models["lgb"].predict_proba(X_val)[:,1]
 
+    # Initialize stk_meta_preds_numpy with a default size based on X_val and seq_len
+    num_expected_stk_val_samples = len(X_val) - seq_len + 1 if len(X_val) >= seq_len else 0
+    if num_expected_stk_val_samples < 0: num_expected_stk_val_samples = 0 # Ensure non-negative
+    stk_meta_preds_numpy = np.full(num_expected_stk_val_samples, 0.5) # Default fallback
 
-    stk_meta_preds_numpy = np.array([]) # Initialize
-    if models.get("stk") and ('torch' in globals() or 'torch' in locals()): # Check torch again
+    if models.get("stk") and _torch: # Check _torch for general availability (from train_ensemble top)
         X_val_values = X_val # Assuming X_val is already a numpy array
-        if X_val_values.ndim > 1 and X_val_values.shape[1] > 0 : # Ensure X_val has features for Stockformer
-            Xs_val_tensor = make_tensor(X_val_values) # Use the same make_tensor
-            if Xs_val_tensor.shape[0] > 0:
-                stk_meta_preds_numpy = models["stk"](Xs_val_tensor).detach().numpy().flatten()
-            else:
-                num_expected_stk_val_samples = len(X_val_values) - seq_len + 1 if len(X_val_values) >= seq_len else 0
-                stk_meta_preds_numpy = np.full(num_expected_stk_val_samples, 0.5)
-                if num_expected_stk_val_samples <=0 : stk_meta_preds_numpy = np.array([])
-                print("Warning: Stockformer produced no validation sequences for meta-learner. Using fallback.")
-        else: # X_val has no features or is 1D
-            num_expected_stk_val_samples = len(X_val) - seq_len + 1 if len(X_val) >= seq_len else 0
-            stk_meta_preds_numpy = np.full(num_expected_stk_val_samples, 0.5)
-            if num_expected_stk_val_samples <=0 : stk_meta_preds_numpy = np.array([])
+        if X_val_values.ndim > 1 and X_val_values.shape[1] > 0: # Ensure X_val has features
+            try:
+                Xs_val_tensor = make_tensor(X_val_values) # Uses _torch from train_ensemble scope
+                if Xs_val_tensor.shape[0] > 0:
+                    # Stockformer's forward pass uses torch components imported within Stockformer itself.
+                    # _torch.no_grad() ensures inference mode.
+                    with _torch.no_grad():
+                        stk_predictions = models["stk"](Xs_val_tensor)
+                    # .numpy() implicitly handles .detach() if tensor was on CUDA and requires grad
+                    current_stk_preds = stk_predictions.numpy().flatten()
+
+                    if len(current_stk_preds) == num_expected_stk_val_samples:
+                        stk_meta_preds_numpy = current_stk_preds
+                    else:
+                        # This case should ideally not happen if make_tensor is consistent
+                        # and Xs_val_tensor.shape[0] implies num_expected_stk_val_samples
+                        print(f"Warning: Stockformer validation predictions length ({len(current_stk_preds)}) "
+                              f"mismatch with expected ({num_expected_stk_val_samples}). Using fallback.")
+                        # stk_meta_preds_numpy remains the pre-filled fallback
+                elif num_expected_stk_val_samples > 0 : # No sequences, but expected some
+                    print("Warning: Stockformer produced no validation sequences for meta-learner. Using fallback.")
+                    # stk_meta_preds_numpy remains the pre-filled fallback
+            except (ImportError, NameError, AttributeError, RuntimeError) as e:
+                print(f"Stockformer validation prediction failed due to error: {e}. Using fallback.")
+                # stk_meta_preds_numpy remains the pre-filled fallback
+        elif num_expected_stk_val_samples > 0: # X_val has no features or is 1D, but expected sequences
             print("Warning: X_val for Stockformer has no features or is 1D. Using fallback for STK predictions.")
-    else: # Stockformer was not trained or skipped (or torch not available)
-        num_expected_stk_val_samples = len(X_val) - seq_len + 1 if len(X_val) >= seq_len else 0
-        stk_meta_preds_numpy = np.full(num_expected_stk_val_samples, 0.5) # Fallback
-        if num_expected_stk_val_samples <=0 : stk_meta_preds_numpy = np.array([])
-        # print("Warning: Stockformer model is None or PyTorch not available. Using fallback predictions for meta-learner.")
+            # stk_meta_preds_numpy remains the pre-filled fallback
+    # else: # Stockformer not trained, or PyTorch (_torch) not available
+        # stk_meta_preds_numpy is already pre-filled with fallback
+        # Optional: Print a message if STK was expected but unavailable
+        # if models.get("stk") is None and _torch: # _torch means torch *could* have been available
+        #     if num_expected_stk_val_samples > 0: print("Warning: Stockformer model is None. Using fallback for meta-learner.")
+        # elif not _torch: # PyTorch itself was not available from the start
+        #     if num_expected_stk_val_samples > 0: print("Warning: PyTorch not available. Using fallback for STK predictions in meta-learner.")
 
     # Align y_meta: y_val needs to be sliced like y_train for Stockformer
+    # The length of y_meta must match stk_meta_preds_numpy's length (which is num_expected_stk_val_samples)
     y_meta = y_val[seq_len-1 : seq_len-1 + len(stk_meta_preds_numpy)]
 
     xgb_meta_preds_aligned = xgb_meta_preds[seq_len-1 : seq_len-1 + len(stk_meta_preds_numpy)]
@@ -310,21 +361,46 @@ def stacked_predict(models: dict, X_latest: np.ndarray) -> float:
     lgb_p = models["lgb"].predict_proba(xgb_lgb_input)[:,1] if models.get("lgb") else np.array([0.5])
 
     stk_p_item = 0.5 # Default
-    if models.get("stk") and not models.get("meta_stk_fallback", False) and ('torch' in globals() or 'torch' in locals()):
-        import torch # Ensure torch is available
+    _torch_available_for_predict = False
+    try:
+        import torch # Try to import torch for this specific prediction
+        _torch_available_for_predict = True
+    except ImportError:
+        # This message can be noisy if torch is known to be unavailable system-wide.
+        # Print only if a Stockformer model exists, implying it was trained and might be expected to work.
+        if models.get("stk") and not models.get("meta_stk_fallback", False):
+            print("PyTorch not available for stacked_predict. STK path will use fallback.")
+
+    if models.get("stk") and not models.get("meta_stk_fallback", False) and _torch_available_for_predict:
         seq_len = models["seq_len"]
         if X_latest.shape[0] < seq_len:
-            print(f"Warning: X_latest has {X_latest.shape[0]} rows, less than seq_len {seq_len}. STK prediction might be unreliable.")
+            print(f"Warning: X_latest has {X_latest.shape[0]} rows, less than seq_len {seq_len}. STK prediction might be unreliable (using fallback).")
+            # stk_p_item remains 0.5 (default fallback)
         else:
             stk_input_np = X_latest[-seq_len:, :]
             if stk_input_np.shape[0] == seq_len and stk_input_np.shape[1] > 0: # Also check for features
-                xf_tensor = torch.tensor(stk_input_np, dtype=torch.float32).unsqueeze(0)
-                stk_p_tensor = models["stk"](xf_tensor)
-                stk_p_item = stk_p_tensor.item()
-            elif stk_input_np.shape[1] == 0 :
-                 print(f"Warning: STK input has no features. Using fallback for STK prediction.")
-            else: # Shape mismatch
+                try:
+                    # Ensure torch.tensor and model call use the locally imported torch
+                    xf_tensor = torch.tensor(stk_input_np, dtype=torch.float32).unsqueeze(0)
+                    # model["stk"] is a Stockformer instance which has its own torch imports.
+                    # torch.no_grad() ensures inference mode.
+                    with torch.no_grad():
+                         stk_p_tensor = models["stk"](xf_tensor)
+                    stk_p_item = stk_p_tensor.item()
+                except Exception as e_stk_pred: # Catch any error during STK prediction
+                    print(f"Warning: Error during Stockformer prediction: {e_stk_pred}. Using fallback for STK prediction.")
+                    # stk_p_item remains 0.5 (default fallback)
+            elif stk_input_np.shape[1] == 0 : # No features for STK model
+                 print(f"Warning: STK input has no features (shape: {stk_input_np.shape}). Using fallback for STK prediction.")
+                 # stk_p_item remains 0.5
+            else: # Shape mismatch (e.g. not enough rows after slicing, though outer if should catch this)
                  print(f"Warning: STK input shape {stk_input_np.shape} after slicing for seq_len {seq_len} is not as expected. Using fallback for STK prediction.")
+                 # stk_p_item remains 0.5
+    elif models.get("stk") and not models.get("meta_stk_fallback", False) and not _torch_available_for_predict:
+        # This case is when STK model exists, it's not a meta_fallback case, but torch wasn't even importable here.
+        # The earlier ImportError print might have already notified. This is an additional safeguard message if needed.
+        # print("Info: Stockformer model exists but PyTorch not available for this prediction. Using fallback for STK.")
+        pass # stk_p_item remains 0.5 (default fallback)
 
     meta_in_list = [xgb_p[0], lgb_p[0], stk_p_item]
     meta_in_array = np.array([meta_in_list])
@@ -360,126 +436,95 @@ START_DATE      = (dt.date.today() - dt.timedelta(days=50)).isoformat()
 END_DATE        = dt.date.today().isoformat()
 ETF_LONG, ETF_SH = "SPXL", "SPXS"
 CAPITAL, RISK_PCT, SLIP_BP    = 100_000.0, 0.01, 5
-MODEL_PATH      = "xgb_reversal.model"
+MODEL_PATH      = "xgb_reversal.model" # Note: Ensemble model saving/loading needs review
 REG_PCTL        = 0.75   # 75-th percentile of atr_pct defines “high-vol” regime
 
 # ---------- cache & grid --------------------------------
 CACHE_DIR   = "pred_cache"
 os.makedirs(CACHE_DIR, exist_ok=True)
-GRID_STEPS  = 21               # 0 = spot, ±10 ticks of 0.1 %
+# GRID_STEPS  = 21 # Seems unused
 
 # ---------------------- Data utilities ----------------------------------------
 # START_DATE, END_DATE, INTERVAL are assumed to be defined globally in InfinitDay.py
 
 def download(tkr: str) -> pd.DataFrame:
-    df_result = pd.DataFrame() # Initialize df_result as an empty DataFrame
-
+    df_result = pd.DataFrame()
+    # Create session once, outside the loop
+    session = requests.Session()
+    # Standard User-Agent can help avoid some blocking issues
+    headers = {'User-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+    session.headers.update(headers)
 
     for attempt_number in range(MAX_RETRIES):
         try:
-            # --- TEMPORARY TEST CODE START ---
-            # (Code for Part 2 removed)
-            # --- TEMPORARY TEST CODE END ---
-            print(f"Attempt {attempt_number + 1} to download {tkr}...")
+            print(f"Attempt {attempt_number + 1}/{MAX_RETRIES} to download {tkr} from {START_DATE} to {END_DATE} ({INTERVAL} interval)...")
+            # Use the session in yf.download
             df_temp = yf.download(tkr, start=START_DATE, end=END_DATE,
-                                  interval=INTERVAL, progress=False, timeout=30) # Removed session=session
+                                  interval=INTERVAL, progress=False, timeout=30, session=session)
 
             if not df_temp.empty:
                 df_result = df_temp
                 print(f"Successfully downloaded data for {tkr} on attempt {attempt_number + 1}.")
                 break  # Success, exit retry loop
             else:
-                # yfinance returned empty df without raising an exception
-                print(f"Warning: No data downloaded for {tkr} (yf.download returned empty) on attempt {attempt_number + 1}. No retry for this case.")
-                break # No need to retry if yfinance returns empty without error
+                # yfinance returned empty df without an exception (e.g. no data for period)
+                print(f"Warning: No data downloaded for {tkr} (empty DataFrame returned by yfinance) on attempt {attempt_number + 1}. Not retrying for this case.")
+                break # Don't retry if yfinance returns empty successfully for the given period
 
-        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e: # Removed yf.shared.YFRateLimitError
-            print(f"Warning: Attempt {attempt_number + 1}/{MAX_RETRIES} for {tkr} failed with error: {e}")
-            if attempt_number < MAX_RETRIES - 1:
-                delay = INITIAL_BACKOFF_SECONDS * (2 ** attempt_number)
-                print(f"Retrying {tkr} after {delay} seconds...")
-                time.sleep(delay)
-            else:
-                print(f"All {MAX_RETRIES} retries failed for {tkr}. Returning empty DataFrame.")
-                # df_result remains empty as initialized
-        except Exception as e:
-            # This catches other unexpected errors during yf.download or processing
-            error_str = str(e).lower()
-            # Check if it's a known retryable error type that might have been missed in the specific catch block
-            # This is a fallback, ideally specific exceptions are caught above.
-            is_potentially_retryable_error = ("yfratelimiterror" in error_str or
-                                   "too many requests" in error_str or
-                                   "rate limited" in error_str or
-                                   "429 client error" in error_str or
-                                   "connectionerror" in error_str or # Check for "connectionerror" string
-                                   "timeout" in error_str or # Check for "timeout" string
-                                   "temporary error" in error_str)
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e_conn_timeout:
+            print(f"Warning: Attempt {attempt_number + 1}/{MAX_RETRIES} for {tkr} failed with connection/timeout error: {e_conn_timeout}")
+            # Fall through to backoff logic
+        except Exception as e_other: # Catch other yfinance or unexpected errors
+            error_str = str(e_other).lower()
+            # Common strings indicating a rate limit or temporary server issue from yfinance or underlying request mechanisms
+            is_retryable_error = ("yfratelimiterror" in error_str or
+                                  "too many requests" in error_str or
+                                  "rate limited" in error_str or
+                                  "429" in error_str or # HTTP 429 Too Many Requests
+                                  "temporary error" in error_str or
+                                  "service unavailable" in error_str or # HTTP 503
+                                  "internal server error" in error_str) # HTTP 500 - sometimes temporary
 
-            if is_potentially_retryable_error and attempt_number < MAX_RETRIES - 1:
-                print(f"Warning: Attempt {attempt_number + 1}/{MAX_RETRIES} for {tkr} failed with a potentially retryable error: {e}")
-                delay = INITIAL_BACKOFF_SECONDS * (2 ** attempt_number)
-                print(f"Retrying {tkr} after {delay} seconds...")
-                time.sleep(delay)
-            elif is_potentially_retryable_error and attempt_number == MAX_RETRIES - 1:
-                 print(f"All {MAX_RETRIES} retries failed for {tkr} with a potentially retryable error: {e}. Returning empty DataFrame.")
-            else:
-                # Non-retryable error or last attempt for a generic exception
-                print(f"Failed to download data for {tkr} due to a non-retryable or unexpected error after {attempt_number + 1} attempts: {e}")
-                # df_result remains empty. We break here as this is outside the specific retry logic for ConnectionError etc.
+            if is_retryable_error:
+                print(f"Warning: Attempt {attempt_number + 1}/{MAX_RETRIES} for {tkr} failed with potentially retryable error: {e_other}")
+                # Fall through to backoff logic if not last attempt
+            else: # Non-retryable error
+                print(f"Failed to download {tkr} due to a non-retryable error: {e_other}")
+                # df_result remains empty, break loop as further retries for this error are futile
                 break
 
-    try:
-        session = requests.Session()
-        headers = {'User-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
-        session.headers.update(headers)
-
-        df_temp = yf.download(tkr, start=START_DATE, end=END_DATE,
-                              interval=INTERVAL, progress=False, timeout=30, session=session)
-
-        if df_temp.empty:
-            print(f"Warning: No data downloaded for {tkr} (yf.download returned empty).")
-            # df_result remains the empty DataFrame initialized earlier
-        else:
-            df_result = df_temp # Assign downloaded data
-
-    except Exception as e:
-        error_str = str(e).lower()
-        # More robust check for rate limit error messages
-        is_rate_limit_error = ("yfratelimiterror" in error_str or
-                               "too many requests" in error_str or
-                               "rate limited" in error_str or
-                               "429 client error" in error_str or # Check for 429 status
-                               "temporary error" in error_str) # Added for general temporary issues
-
-        if is_rate_limit_error:
-            print(f"Warning: Rate limit error or temporary issue encountered for ticker {tkr}. Returning empty DataFrame. Error: {e}")
-            # df_result remains the empty DataFrame initialized earlier
-        else:
-            # For any other exception during the download, wrap it in a ValueError.
-            raise ValueError(f"Failed to download data for {tkr} due to an unexpected error: {e}")
->>>>>>> main
+        # Backoff logic for retrying
+        if attempt_number < MAX_RETRIES - 1:
+            delay = INITIAL_BACKOFF_SECONDS * (2 ** attempt_number)
+            print(f"Retrying {tkr} after {delay} seconds...")
+            time.sleep(delay)
+        else: # Last attempt failed
+            print(f"All {MAX_RETRIES} retries failed for {tkr}.")
+            # df_result remains empty
 
     # Post-processing, only if df_result is not empty
     if not df_result.empty:
-        # Only attempt tz_localize if the index is timezone-aware
+        # Timezone localization: make index timezone-naive if it's aware
         if df_result.index.tz is not None:
             try:
                 df_result = df_result.tz_localize(None)
-            except TypeError as tz_e:
-                # This might happen if it's already naive but somehow df_result.index.tz was not None.
-                print(f"Note: Could not make timezone naive for {tkr} (already naive or other issue). Error: {tz_e}")
+            except TypeError as tz_e: # Specifically catch TypeError if already naive (though .tz should be None then)
+                print(f"Note: Could not make timezone naive for {tkr} (possibly already naive or other issue). Error: {tz_e}")
+            except Exception as e_gen_tz: # Catch any other unexpected error during tz_localize
+                print(f"Warning: Error during tz_localize for {tkr}: {e_gen_tz}. Proceeding with potentially tz-aware index.")
 
-            except Exception as e_tz: # Catch any other error during tz_localize
-                print(f"Warning: Error during tz_localize for {tkr}: {e_tz}. Proceeding with potentially tz-aware index.")
-
-
-
-        # Flatten MultiIndex columns
-        # Ensure columns is actually a MultiIndex and has levels to prevent errors
+        # Flatten MultiIndex columns if yfinance returns them (e.g. for multiple tickers, though less common for single)
+        # Check if the top level has a single, possibly ticker-named, value.
         if isinstance(df_result.columns, pd.MultiIndex) and df_result.columns.nlevels > 1:
-            # Check if the top level has a single value (usually the ticker)
+            # Check if the first level of columns has only one unique value (often the ticker itself)
             if len(df_result.columns.get_level_values(0).unique()) == 1:
                  df_result.columns = df_result.columns.droplevel(0)
+            else:
+                 # This case might occur if yfinance changes format or for specific data types.
+                 # For now, we'll only flatten if the top level is singular to avoid accidental data loss.
+                 print(f"Note: Columns for {tkr} are MultiIndex, but the top level is not singular. Not flattening automatically.")
+                 # Potentially, one might want to join levels: df.columns = ['_'.join(col).strip() for col in df.columns.values]
+                 # But this requires careful consideration of the expected column structure.
 
     return df_result
 
@@ -553,11 +598,23 @@ def engineer(df: pd.DataFrame) -> pd.DataFrame:
             print(f"Warning: Expected column {col_name} not found in DataFrame.")
 
 
-    d["log_ret"]   = np.log(d["Close"] / d["Close"].shift(1))
-    d["cum_ret60"] = d["Close"] / d["Close"].shift(LOOKBACK) - 1  # 🔸past hour
+    # Ensure 'Close' and its shifted versions are positive for division/log
+    close_safe = d["Close"].replace(0, np.nan).fillna(method='ffill').fillna(1e-9) # Fill 0s then ensure positive
+    close_shifted_1 = d["Close"].shift(1).replace(0, np.nan).fillna(method='ffill').fillna(1e-9)
+    close_shifted_lookback = d["Close"].shift(LOOKBACK).replace(0, np.nan).fillna(method='ffill').fillna(1e-9)
+
+    d["log_ret"]   = np.log(close_safe / close_shifted_1)
+    d["cum_ret60"] = close_safe / close_shifted_lookback - 1
     d["trend_sign"] = np.sign(d["cum_ret60"])
 
     # VWAP calculation using numpy arrays for robustness
+    # Example of VWAP calculation:
+    # Assume daily data for simplicity in example (though script uses intraday)
+    #   High  Low  Close  Volume | Typical Price = (H+L+C)/3 | Vol*TP   | CumVol*TP | CumVol | VWAP
+    #0   101   99   100    100    | 100.00                    | 10000.0  | 10000.0   | 100    | 10000.0/100    = 100.00
+    #1   102   100  101    200    | 101.00                    | 20200.0  | 30200.0   | 300    | 30200.0/300    = 100.67
+    #2   100   98   99     150    |  99.00                    | 14850.0  | 45050.0   | 450    | 45050.0/450    = 100.11
+    # Note: .ffill().fillna(0) is applied to the final VWAP series in the code.
     typical_price_values = d[["High","Low","Close"]].mean(axis=1).values
     volume_values = d["Volume"].values # Should be a Series now due to above loop
 
@@ -622,15 +679,33 @@ def engineer(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ====== 1. BETTER LABELS — TRIPLE-BARRIER (non-overlapping) ================
-TP_PCT = 0.0060 # +0.60 % take–profit
-SL_PCT = 0.0035 # –0.35 % stop-loss
-MAX_HOLD = 6 # 6×5-min bars (≈30 min)
+# Global TP_PCT, SL_PCT, MAX_HOLD (defined earlier) are used as defaults.
+# Redundant local definitions are removed.
 
 def triple_barrier_labels(df: pd.DataFrame, tp: float = TP_PCT, sl: float = SL_PCT, max_hold: int = MAX_HOLD) -> pd.Series:
     """ Non-overlapping triple-barrier labelling.
     +1 → take-profit hit first
     -1 → stop hit first
     0 → no decisive event / padded rows skipped
+
+    Example:
+    >>> import pandas as pd
+    >>> import numpy as np
+    >>> # Script's global constants for TP_PCT, SL_PCT, MAX_HOLD are used by default.
+    >>> # For a self-contained doctest with specific parameters:
+    >>> prices_doctest = [100, 101, 99, 100, 102, 100, 98, 100] # Total 8 bars
+    >>> df_doctest = pd.DataFrame({'Close': prices_doctest})
+    >>> # Test with TP=1%, SL=1%, Hold=2 bars
+    >>> # Bar 0 (100): TP at 101 (1 bar), SL at 99 (2 bars). Window [101, 99]. TP hit first. Label 1. Skip 1 bar. i becomes 1.
+    >>> # Bar 1 (101): TP at 102.01, SL at 99.99. Window [99, 100]. SL hit first. Label -1. Skip 1 bar. i becomes 2.
+    >>> # Bar 2 (99): TP at 99.99, SL at 98.01. Window [100, 102]. TP hit first. Label 1. Skip 1 bar. i becomes 3.
+    >>> # Bar 3 (100): TP at 101, SL at 99. Window [102, 100]. TP hit first. Label 1. Skip 1 bar. i becomes 4.
+    >>> # Bar 4 (102): TP at 103.02, SL at 100.98. Window [100, 98]. SL hit first. Label -1. Skip 1 bar. i becomes 5.
+    >>> # Bar 5 (100): TP at 101, SL at 99. Window [98, 100]. SL hit first. Label -1. Skip 1 bar. i becomes 6.
+    >>> # Bar 6 (98): Loop condition `i < len(df) - max_hold` (6 < 8 - 2 = 6) is false. Loop terminates.
+    >>> # Remaining labels (index 6, 7) are 0.
+    >>> triple_barrier_labels(df_doctest, tp=0.01, sl=0.01, max_hold=2).tolist()
+    [1, -1, 1, 1, -1, -1, 0, 0]
     """
     # Ensure numpy and pandas are imported, typically at the script's top level.
     # For safety within a function if it were to be isolated:
@@ -735,6 +810,22 @@ def orderflow_features(df: pd.DataFrame) -> pd.DataFrame:
     down_vol = np.where(d["ret"].fillna(0) < 0, d["Volume"], 0)
 
     rolling_window_ofi = 6 # As per issue example (rolling(6))
+    # Example for vol_imb (rolling_window_ofi = 2 for simplicity in this example):
+    # Assume d['ret'] and d['Volume'] are:
+    # ret: [NaN, 0.1, -0.1, 0.05, -0.02]
+    # Vol: [10,  20,   30,   10,    50]
+    # up_vol:   [0, 20, 0,  10, 0]
+    # down_vol: [0, 0,  30, 0,  50]
+    # sum_up_vol (roll 2): [0, 20, 20, 10, 10]
+    # sum_down_vol (roll 2): [0, 0, 30, 30, 50]
+    # total_vol_for_rolling: [0, 20, 30, 10, 50]
+    # sum_total_vol (roll 2): [0, 20, 50, 40, 60]
+    # vol_imb = (sum_up - sum_down) / sum_total_vol (eps added to denom):
+    #   idx 0: (0-0)/0 (NaN -> fillna(0)) = 0
+    #   idx 1: (20-0)/20 = 1.0
+    #   idx 2: (20-30)/50 = -0.2
+    #   idx 3: (10-30)/40 = -0.5
+    #   idx 4: (10-50)/60 = -0.666...
 
     # Ensure index alignment for Series operations if df's index isn't default RangeIndex or is non-unique
     # The issue uses pd.Series(up_vol).rolling(6) which implicitly uses a new RangeIndex if up_vol is a raw numpy array.
@@ -1051,22 +1142,32 @@ class Backtest:
 
         # Main backtesting loop
         position, entry_px, qty, side, bars_in_trade = 0, 0, 0, 0, 0
-        self.equity = []
-        current_capital = CAPITAL # Use a local var for capital during simulation
+
+        # Refined equity tracking and PNL calculation
+        _equity_over_time = [CAPITAL] * len(d) # Initialize with starting capital for all bars
+        current_capital = CAPITAL
+        trade_pnls_list = [] # List to store PNL of each closed trade
 
         # For ensemble, prediction needs last seq_len rows.
         # Loop from seq_len -1 to ensure enough history for the first potential prediction.
+        # Decisions and trades impact capital from bar 'i' onwards.
+        # Equity before loop start (i.e. for bars 0 to seq_len-2) remains CAPITAL.
+
         for i in range(self.seq_len -1, len(d)):
             row = d.iloc[i]
             px = row["Open"] # Entry/Exit price for current bar
 
+            # Apply PNL from previous bar's close before making new decisions for current bar 'i'
+            if i > 0: # Ensure current_capital reflects state at start of bar i
+                 _equity_over_time[i] = current_capital
+            else: # For the very first bar of decision making (i == 0, if seq_len was 1)
+                 _equity_over_time[i] = CAPITAL
+
+
             # Try to make a prediction if no position
             if position == 0:
-                # Prepare X_latest: last seq_len rows up to and including d.iloc[i-1]
-                # Prediction for current bar 'i' is based on data available *before* its open.
-                # So, features from d.iloc[i - self.seq_len : i]
-                if i >= self.seq_len : # Check if we have enough history for a full X_latest
-                    X_latest_df = d.iloc[i - self.seq_len : i]
+                if i >= self.seq_len :
+                    X_latest_df = d.iloc[i - self.seq_len : i] # Features from i-seq_len to i-1
                     X_latest = X_latest_df[self.feature_cols].values
 
                     if X_latest.shape[0] == self.seq_len and X_latest.shape[1] == len(self.feature_cols):
@@ -1077,72 +1178,67 @@ class Backtest:
                             except Exception as e_pred_bt:
                                 print(f"BT Error at index {i} during stacked_predict: {e_pred_bt}")
                         else:
-                            if i == self.seq_len: # Print warning only once
+                            if i == self.seq_len:
                                 print("BT WARNING: stacked_predict function not found.")
                         d.loc[d.index[i], "prob"] = current_prob
 
-                        # Trade eligibility & signal generation
-                        # _trade_eligible checks generic conditions (bb_z, spread_pct)
-                        # Assume _trade_eligible is available in the class or globally
                         eligible_now = Backtest._trade_eligible(row) if hasattr(Backtest, '_trade_eligible') else True
-                        backtest_threshold = 0.55 # Example threshold
+                        backtest_threshold = 0.55
 
                         if eligible_now and current_prob > 0 and current_prob >= backtest_threshold:
-                            d.loc[d.index[i], "signal"] = 1 # Signal to trade
+                            d.loc[d.index[i], "signal"] = 1
 
             # Trade Execution Logic
             if position == 0 and d.loc[d.index[i], "signal"] == 1:
-                # Use trend_sign from the CURRENT bar 'i' for decision
-                # The signal was based on data PRIOR to bar 'i'
                 current_trend_sign = row["trend_sign"]
-                side = -1 if current_trend_sign == 1 else 1 # -1 for short (SPXS), 1 for long (SPXL)
-                entry_px = px * (1 + SLIP_BP / 1e4 * side) # Adjust slip based on side if needed, here simplified
-                # Risk management: qty based on RISK_PCT of current_capital and stop_level_pct
-                # Calculate stop_level_pct (similar to original backtest)
+                side = -1 if current_trend_sign == 1 else 1
+                entry_px = px * (1 + SLIP_BP / 1e4 * side)
                 stop_level_atr = row["atr"] / row["Close"] if row["Close"] > 0 and pd.notna(row["atr"]) else STOP_PCT
                 effective_stop_pct = max(STOP_PCT, stop_level_atr)
                 if entry_px > 0 and effective_stop_pct > 0:
                     qty = (current_capital * RISK_PCT) / (entry_px * effective_stop_pct)
                     position, bars_in_trade = side, 0
-                else: qty = 0; position = 0; # Cannot calculate qty, no trade
+                else: qty = 0; position = 0;
             elif position != 0:
                 bars_in_trade += 1
-                cur_px = row["Close"] # Evaluate exit at close of bar
+                cur_px = row["Close"]
                 change = (cur_px - entry_px) * position / entry_px
-
                 stop_level_atr_exit = row["atr"] / row["Close"] if row["Close"] > 0 and pd.notna(row["atr"]) else STOP_PCT
                 effective_stop_pct_exit = max(STOP_PCT, stop_level_atr_exit)
 
-                # Exit conditions: TP, SL, or MAX_HOLD (from new constants)
-                # FWD_WINDOW was used before, MAX_HOLD is from new TBL. Let's use MAX_HOLD.
                 if change >= TP_PCT or change <= -effective_stop_pct_exit or bars_in_trade >= MAX_HOLD:
-                    exit_px = cur_px * (1 - SLIP_BP / 1e4 * side) # Slip on exit
+                    exit_px = cur_px * (1 - SLIP_BP / 1e4 * side)
                     pnl = qty * (exit_px - entry_px) * position
                     current_capital += pnl
+                    trade_pnls_list.append(pnl) # Log PNL for this trade
                     position = 0
-            self.equity.append(current_capital)
 
-        # If loop didn't run (e.g. not enough data), ensure equity has initial capital
-        if not self.equity and not d.empty : self.equity = [CAPITAL] * len(d)
-        elif not self.equity and d.empty: self.equity = [CAPITAL]
-        elif self.equity and len(self.equity) < len(d): # If loop exited early
-             # Pad equity for remaining rows if needed, assuming no trades
-             self.equity.extend([self.equity[-1]] * (len(d) - len(self.equity)))
+            # Update equity for the current bar 'i' after all operations for this bar
+            _equity_over_time[i] = current_capital
 
-        self.cap = current_capital # Final capital
+        self.equity = _equity_over_time
+        # Handle case where df might be too short for the loop to run even once
+        if not d.empty and not self.equity: # Should not happen if len(d) >= seq_len -1
+            self.equity = [CAPITAL] * len(d)
+        elif d.empty:
+            self.equity = [CAPITAL]
+
+
+        self.cap = current_capital
         ret = (self.cap / CAPITAL - 1) * 100
-        # Calculate wins/losses based on PNL of trades, not just equity diff for more accuracy
-        # This part needs more detailed trade logging to be precise. Simplified for now:
-        trade_pnls = np.diff(self.equity) # Simplified: PNLs from equity changes when trades occur
-                                                     # More robust: log PNL per trade
-        wins = (trade_pnls > 0).sum() if len(trade_pnls) > 0 else 0
-        losses = (trade_pnls < 0).sum() if len(trade_pnls) > 0 else 0
-        trades = wins + losses
+
+        # Refined Win-Rate Calculation
+        trades = len(trade_pnls_list)
+        wins = sum(p > 0 for p in trade_pnls_list)
+        # losses = sum(p < 0 for p in trade_pnls_list) # Not strictly needed for WR
         wr = wins / trades if trades else 0
         print(f"Return {ret:.2f}% | Win-rate {wr:.2%} | Trades {trades}")
 
 # ---------------------- Live decision helper ----------------------------------
 # Assumes engineer, choose_regime, ETF_LONG, INTERVAL are defined globally
+# NOTE: This function appears to be unused by the current --live logic in main(),
+# which uses an ensemble model. This function seems related to an older regime-based model.
+# Consider for removal if confirmed obsolete.
 def get_live_prediction_data(bundle: dict):
     vol_thresh = bundle.get("vol_thresh")
     feature_cols = bundle.get("feats")
@@ -1450,8 +1546,20 @@ def main():
                          'seq_len': seq_len_param, 'feature_cols': all_cols,
                          'error': 'train_ensemble function not defined'
                      }
-                     # To allow script to proceed, also ensure MODEL_PATH is handled or training is skipped
                  print("Ensemble training process finished (or skipped).")
+
+            # Save the bundle if training was attempted and produced a bundle
+            if bundle and not bundle.get('error'):
+                try:
+                    with open(MODEL_PATH, "wb") as f:
+                        pickle.dump(bundle, f)
+                    print(f"Ensemble model bundle successfully saved to {MODEL_PATH}")
+                except Exception as e_save:
+                    print(f"Error saving ensemble model bundle to {MODEL_PATH}: {e_save}")
+            elif bundle and bundle.get('error'):
+                print(f"Ensemble training resulted in an error, not saving bundle: {bundle.get('error')}")
+            else: # Should ideally not be reached if bundle is always created, but as a safeguard
+                print("Ensemble training did not produce a valid bundle, not saving.")
         # print("Training complete. Model bundle generated.") # Original message, can be adapted
     else:
         print(f"Loading existing ENSEMBLE model bundle from {MODEL_PATH}...")
@@ -1474,19 +1582,23 @@ def main():
     # a single model, iso, THRESH, and feats structure, not a regime-based bundle.
     # This needs to be addressed in a subsequent step/subtask.
     if args.bt:
-        print("\nStarting backtest with regime-based models...")
-        if 'models' not in bundle or not bundle['models'] or \
-           bundle.get('vol_thresh') is None or np.isnan(bundle.get('vol_thresh')) or \
-           'feats' not in bundle:
-            print("Cannot run backtest: model bundle is incomplete (missing models, vol_thresh, or feats).")
+        print("\nStarting backtest with ENSEMBLE models...") # Updated comment
+        # Refined bundle check for ensemble model
+        bundle_is_valid_for_bt = (bundle and
+                                  not bundle.get('error') and
+                                  bundle.get('feature_cols') and
+                                  bundle.get('seq_len') is not None and
+                                  (bundle.get('meta') or bundle.get('xgb') or bundle.get('lgb') or bundle.get('stk'))) # Check for at least one model component
+
+        if not bundle_is_valid_for_bt:
+            print("Cannot run backtest: model bundle is incomplete, has errors, or is missing critical components (feature_cols, seq_len, or any actual model).")
         else:
             backtest_data = dataset()
             # Check if essential columns are present in the data from dataset()
             # These columns are produced by engineer()
-            expected_eng_cols = ['atr_pct', 'bb_z', 'spread_pct', 'trend_sign', 'Open', 'Close', 'atr', 'cum_ret60'] # Added cum_ret60 for safety, though trend_sign is derived from it.
-            # bundle['feats'] contains the model features.
-            # Ensure all columns in bundle['feats'] and expected_eng_cols are in backtest_data.columns
-            all_required_cols = list(set(bundle['feats'] + expected_eng_cols)) # Use set to avoid duplicates
+            expected_eng_cols = ['atr_pct', 'bb_z', 'spread_pct', 'trend_sign', 'Open', 'Close', 'atr', 'cum_ret60']
+            # Use 'feature_cols' from bundle, not 'feats'
+            all_required_cols = list(set(bundle['feature_cols'] + expected_eng_cols))
             missing_cols = [col for col in all_required_cols if col not in backtest_data.columns]
 
             if backtest_data.empty:
