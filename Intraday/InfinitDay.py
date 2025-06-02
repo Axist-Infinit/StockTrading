@@ -12,22 +12,22 @@ SPXL / SPXS – Intraday-Reversal Model (XGBoost)
 • Risk: 1 % of equity, stop = 0.35 % or 1×ATR, TP = 0.60 %
 • Works as:  (i) trainer / back-tester,  (ii) live decision engine
 """
-import argparse, datetime as dt, os, pickle, sys
+import argparse, datetime as dt, os, pickle, sys, time
 from typing import List, Tuple
 from collections import defaultdict
 
 import numpy as np
 import pandas as pd
 import yfinance as yf
-import xgboost as xgb
+# import xgboost as xgb # Moved into functions
 from sklearn.metrics import accuracy_score, f1_score, precision_recall_fscore_support
 from sklearn.model_selection import train_test_split
 from sklearn.isotonic import IsotonicRegression      # 🔸 NEW
 import optuna
 
-from lightgbm import LGBMClassifier
-import torch
-import torch.nn as nn
+# from lightgbm import LGBMClassifier # Moved into functions
+# import torch # Moved into functions
+# import torch.nn as nn # Moved into functions
 from sklearn.linear_model import LogisticRegression
 import requests # Ensure this import is added at the top of the file
 
@@ -38,12 +38,14 @@ import requests # Ensure this import is added at the top of the file
 #       import torch.nn as nn
 
 # --- 3a. Stockformer – minimal transformer-based classifier -------------------
-class Stockformer(nn.Module):
+class Stockformer(torch.nn.Module if 'torch' in globals() and 'nn' in globals() else object): # Make conditional for when torch is not loaded
     """
     Tiny transformer for tabular sequences (lookback_window × features).
     """
     def __init__(self, n_features: int, seq_len: int = 12, d_model: int = 32,
                  nhead: int = 4, num_layers: int = 2):
+        import torch
+        import torch.nn as nn
         super().__init__()
         # Ensure nn.Linear and nn.TransformerEncoderLayer/nn.TransformerEncoder are available
         # These come from torch.nn, which should be imported as nn.
@@ -56,9 +58,10 @@ class Stockformer(nn.Module):
                                  nn.Sigmoid())
 
     def forward(self, x):              # x: [batch, seq_len, n_features]
-        x = self.embed(x)
-        x = self.transformer(x)
-        return self.cls(x)
+        # x = self.embed(x) # embed is already a torch module
+        x_embedded = self.embed(x) # Apply embedding
+        x_transformed = self.transformer(x_embedded) # Apply transformer
+        return self.cls(x_transformed) # Apply classification head
 
 
 # --- 3b. Training & stacking ---------------------------------------------------
@@ -81,30 +84,40 @@ def train_ensemble(X_train, y_train, X_val, y_val, seq_len: int = 12, feature_co
     import pandas as pd # Though not explicitly used in this version, good to have if X_train were df
     import torch
     import torch.nn as nn
-    # XGBoost (xgb), LightGBM (LGBMClassifier), Stockformer class, LogisticRegression
+    import xgboost as xgb
+    from lightgbm import LGBMClassifier
+    # Stockformer class, LogisticRegression
     # are assumed to be available from global imports / definitions.
 
     models = {}
 
     # ---- XGBoost -------------------------------------------------------------
     # print("Training XGBoost for ensemble...") # Optional: for verbosity
-    xgb_params = dict(n_estimators=400, max_depth=6, learning_rate=0.05,
-                      subsample=0.8, colsample_bytree=0.8,
-                      objective="binary:logistic", eval_metric="logloss",
-                      n_jobs=-1, random_state=42) # Added random_state for reproducibility
-    xgb_clf = xgb.XGBClassifier(**xgb_params)
-    xgb_clf.fit(X_train, y_train) # Assumes X_train is a NumPy array or compatible
-    models["xgb"] = xgb_clf
+    try:
+        xgb_params = dict(n_estimators=400, max_depth=6, learning_rate=0.05,
+                          subsample=0.8, colsample_bytree=0.8,
+                          objective="binary:logistic", eval_metric="logloss",
+                          n_jobs=-1, random_state=42) # Added random_state for reproducibility
+        xgb_clf = xgb.XGBClassifier(**xgb_params)
+        xgb_clf.fit(X_train, y_train) # Assumes X_train is a NumPy array or compatible
+        models["xgb"] = xgb_clf
+    except NameError: # xgb not imported due to missing package
+        print("XGBoost not available. Skipping XGBoost training.")
+        models["xgb"] = None
     # print("XGBoost training complete.")
 
     # ---- LightGBM ------------------------------------------------------------
     # print("Training LightGBM for ensemble...")
-    lgb_params = dict(n_estimators=500, num_leaves=64,
-                      learning_rate=0.05, subsample=0.8,
-                      colsample_bytree=0.8, objective="binary", random_state=42) # Added random_state
-    lgb_clf = LGBMClassifier(**lgb_params)
-    lgb_clf.fit(X_train, y_train) # Assumes X_train is a NumPy array or compatible
-    models["lgb"] = lgb_clf
+    try:
+        lgb_params = dict(n_estimators=500, num_leaves=64,
+                          learning_rate=0.05, subsample=0.8,
+                          colsample_bytree=0.8, objective="binary", random_state=42) # Added random_state
+        lgb_clf = LGBMClassifier(**lgb_params)
+        lgb_clf.fit(X_train, y_train) # Assumes X_train is a NumPy array or compatible
+        models["lgb"] = lgb_clf
+    except NameError: # LGBMClassifier not imported
+        print("LightGBM not available. Skipping LightGBM training.")
+        models["lgb"] = None
     # print("LightGBM training complete.")
 
     # ---- Stockformer ---------------------------------------------------------
@@ -117,56 +130,71 @@ def train_ensemble(X_train, y_train, X_val, y_val, seq_len: int = 12, feature_co
     # X_train_values = X_train[feature_cols].values if isinstance(X_train, pd.DataFrame) and feature_cols else X_train
     # For this function, assume X_train IS a numpy array.
     X_train_values = X_train
+    n_feat = X_train_values.shape[1] if X_train_values.ndim > 1 else 0
 
-    n_feat = X_train_values.shape[1]
 
     # Inner function to create sequences for Stockformer
     def make_tensor(X_numpy_array): # X_numpy_array must be a 2D numpy array
+        import torch # Ensure torch is available in this scope
         xs_list = []
         # Start from seq_len-1 to create the first sequence X[0:seq_len]
         # Loop up to len(X_numpy_array) - 1 to get the last sequence X[end-seq_len:end]
         # The target for X[idx-seq_len:idx] is y[idx-1]
+        current_n_feat = X_numpy_array.shape[1] if X_numpy_array.ndim > 1 else 0
         for idx in range(seq_len, len(X_numpy_array) + 1): # Corrected loop range
             window = X_numpy_array[idx-seq_len:idx, :] # Ensure slicing is correct for 2D array
             xs_list.append(torch.tensor(window, dtype=torch.float32))
         if not xs_list: # Handle case where X_numpy_array is too short
-            return torch.empty((0, seq_len, n_feat), dtype=torch.float32)
+            return torch.empty((0, seq_len, current_n_feat), dtype=torch.float32)
         return torch.stack(xs_list)
 
-    Xs_train_tensor = make_tensor(X_train_values)
+    if 'torch' not in globals() and 'torch' not in locals(): # Check if torch was loaded
+        print("PyTorch not available. Skipping Stockformer training.")
+        models["stk"] = None
+        Xs_train_tensor = None # Ensure it's defined
+    elif n_feat == 0:
+        print("Stockformer training skipped: X_train has no features.")
+        models["stk"] = None
+        Xs_train_tensor = None
+    else:
+        Xs_train_tensor = make_tensor(X_train_values)
 
     # Align y_train: target for sequence X[idx-seq_len:idx] is y[idx-1]
     # So, if make_tensor creates sequences ending at original indices k (from seq_len-1 to len-1),
     # the y_train should be y[seq_len-1 : len(y_train)]
     # Number of samples in Xs_train_tensor is len(X_train_values) - seq_len + 1
-    num_stockformer_samples = Xs_train_tensor.shape[0]
+    if Xs_train_tensor is not None:
+        num_stockformer_samples = Xs_train_tensor.shape[0]
 
-    if num_stockformer_samples == 0:
-        print("Stockformer training skipped: no valid training sequences generated (X_train too short).")
-        models["stk"] = None # Mark as not trained
-    else:
-        # y_train needs to be sliced from (seq_len-1) up to (seq_len-1 + num_stockformer_samples)
-        y_stockformer_train = torch.tensor(y_train[seq_len-1 : seq_len-1 + num_stockformer_samples],
-                                           dtype=torch.float32).view(-1,1)
-
-        if Xs_train_tensor.shape[0] != y_stockformer_train.shape[0]:
-             print(f"Shape mismatch! Xs_train_tensor: {Xs_train_tensor.shape}, y_stockformer_train: {y_stockformer_train.shape}. Skipping Stockformer.")
-             models["stk"] = None
+        if num_stockformer_samples == 0:
+            print("Stockformer training skipped: no valid training sequences generated (X_train too short).")
+            models["stk"] = None # Mark as not trained
         else:
-            net = Stockformer(n_feat, seq_len) # Stockformer class must be defined
-            loss_fn = nn.BCELoss()
-            optim_ = torch.optim.Adam(net.parameters(), lr=1e-3)
+            # y_train needs to be sliced from (seq_len-1) up to (seq_len-1 + num_stockformer_samples)
+            y_stockformer_train = torch.tensor(y_train[seq_len-1 : seq_len-1 + num_stockformer_samples],
+                                               dtype=torch.float32).view(-1,1)
 
-            net.train()
-            for epoch in range(5): # Small epoch count for demo
-                optim_.zero_grad()
-                preds_stk = net(Xs_train_tensor)
-                loss = loss_fn(preds_stk, y_stockformer_train)
-                loss.backward()
-                optim_.step()
-                # print(f"Stockformer Epoch {epoch+1}/5, Loss: {loss.item():.4f}") # Optional
-            models["stk"] = net.eval()
-            # print("Stockformer training complete.")
+            if Xs_train_tensor.shape[0] != y_stockformer_train.shape[0]:
+                 print(f"Shape mismatch! Xs_train_tensor: {Xs_train_tensor.shape}, y_stockformer_train: {y_stockformer_train.shape}. Skipping Stockformer.")
+                 models["stk"] = None
+            else:
+                net = Stockformer(n_feat, seq_len) # Stockformer class must be defined
+                loss_fn = nn.BCELoss()
+                optim_ = torch.optim.Adam(net.parameters(), lr=1e-3)
+
+                net.train()
+                for epoch in range(5): # Small epoch count for demo
+                    optim_.zero_grad()
+                    preds_stk = net(Xs_train_tensor)
+                    loss = loss_fn(preds_stk, y_stockformer_train)
+                    loss.backward()
+                    optim_.step()
+                    # print(f"Stockformer Epoch {epoch+1}/5, Loss: {loss.item():.4f}") # Optional
+                models["stk"] = net.eval()
+                # print("Stockformer training complete.")
+    else: # Xs_train_tensor is None (e.g. PyTorch not available)
+        models["stk"] = None
+
 
     # ---- Meta-learner --------------------------------------------------------
     # print("Training meta-learner...")
@@ -174,78 +202,74 @@ def train_ensemble(X_train, y_train, X_val, y_val, seq_len: int = 12, feature_co
     # If it were a DataFrame, use X_val.values or X_val[feature_cols].values
 
     # Predictions from base models on validation set
-    xgb_meta_preds = xgb_clf.predict_proba(X_val)[:,1]
-    lgb_meta_preds = lgb_clf.predict_proba(X_val)[:,1]
+    xgb_meta_preds = np.array([0.5] * len(X_val)) # Default if model not available
+    if models.get("xgb"):
+        xgb_meta_preds = models["xgb"].predict_proba(X_val)[:,1]
+
+    lgb_meta_preds = np.array([0.5] * len(X_val)) # Default if model not available
+    if models.get("lgb"):
+        lgb_meta_preds = models["lgb"].predict_proba(X_val)[:,1]
+
 
     stk_meta_preds_numpy = np.array([]) # Initialize
-    if models.get("stk"):
-        # Create sequences from X_val for Stockformer
-        # X_val_values = X_val[feature_cols].values if isinstance(X_val, pd.DataFrame) and feature_cols else X_val
+    if models.get("stk") and ('torch' in globals() or 'torch' in locals()): # Check torch again
         X_val_values = X_val # Assuming X_val is already a numpy array
-        Xs_val_tensor = make_tensor(X_val_values) # Use the same make_tensor
-
-        if Xs_val_tensor.shape[0] > 0:
-            stk_meta_preds_numpy = models["stk"](Xs_val_tensor).detach().numpy().flatten()
-        else: # If no validation sequences for stockformer
-            # This means y_meta alignment will be tricky.
-            # The original issue code for meta-learner implies stk preds are always there.
-            # Let's align with the number of samples y_val[seq_len:] would have.
-            num_expected_stk_val_samples = len(X_val_values) - seq_len + 1 if len(X_val_values) >= seq_len else 0
-            stk_meta_preds_numpy = np.full(num_expected_stk_val_samples, 0.5) # Fallback
+        if X_val_values.ndim > 1 and X_val_values.shape[1] > 0 : # Ensure X_val has features for Stockformer
+            Xs_val_tensor = make_tensor(X_val_values) # Use the same make_tensor
+            if Xs_val_tensor.shape[0] > 0:
+                stk_meta_preds_numpy = models["stk"](Xs_val_tensor).detach().numpy().flatten()
+            else:
+                num_expected_stk_val_samples = len(X_val_values) - seq_len + 1 if len(X_val_values) >= seq_len else 0
+                stk_meta_preds_numpy = np.full(num_expected_stk_val_samples, 0.5)
+                if num_expected_stk_val_samples <=0 : stk_meta_preds_numpy = np.array([])
+                print("Warning: Stockformer produced no validation sequences for meta-learner. Using fallback.")
+        else: # X_val has no features or is 1D
+            num_expected_stk_val_samples = len(X_val) - seq_len + 1 if len(X_val) >= seq_len else 0
+            stk_meta_preds_numpy = np.full(num_expected_stk_val_samples, 0.5)
             if num_expected_stk_val_samples <=0 : stk_meta_preds_numpy = np.array([])
-            print("Warning: Stockformer produced no validation sequences for meta-learner. Using fallback.")
-    else: # Stockformer was not trained or skipped
+            print("Warning: X_val for Stockformer has no features or is 1D. Using fallback for STK predictions.")
+    else: # Stockformer was not trained or skipped (or torch not available)
         num_expected_stk_val_samples = len(X_val) - seq_len + 1 if len(X_val) >= seq_len else 0
         stk_meta_preds_numpy = np.full(num_expected_stk_val_samples, 0.5) # Fallback
         if num_expected_stk_val_samples <=0 : stk_meta_preds_numpy = np.array([])
-        print("Warning: Stockformer model is None. Using fallback predictions for meta-learner.")
+        # print("Warning: Stockformer model is None or PyTorch not available. Using fallback predictions for meta-learner.")
 
     # Align y_meta: y_val needs to be sliced like y_train for Stockformer
-    # Target for sequence X_val[idx-seq_len:idx] is y_val[idx-1]
-    y_meta = y_val[seq_len-1 : seq_len-1 + len(stk_meta_preds_numpy)] # Align with actual STK preds length
+    y_meta = y_val[seq_len-1 : seq_len-1 + len(stk_meta_preds_numpy)]
 
-    # Align XGB and LGB predictions with y_meta and stk_meta_preds_numpy
-    # The first (seq_len-1) samples of X_val don't have corresponding Stockformer predictions.
-    # So, XGB/LGB predictions for these initial samples are not used in stacking if STK is involved.
     xgb_meta_preds_aligned = xgb_meta_preds[seq_len-1 : seq_len-1 + len(stk_meta_preds_numpy)]
     lgb_meta_preds_aligned = lgb_meta_preds[seq_len-1 : seq_len-1 + len(stk_meta_preds_numpy)]
 
-    # Check if all prediction arrays for meta-learner have the same number of samples
     if not (len(xgb_meta_preds_aligned) == len(lgb_meta_preds_aligned) == len(stk_meta_preds_numpy) == len(y_meta)):
         print(f"Meta-learner input array length mismatch after alignment attempts:")
         print(f"  XGB: {len(xgb_meta_preds_aligned)}, LGB: {len(lgb_meta_preds_aligned)}, STK: {len(stk_meta_preds_numpy)}, y_meta: {len(y_meta)}")
-        # Fallback: if lengths don't match, meta-learner training might fail or be unreliable.
-        # This could happen if X_val is very short.
-        # If stk_meta_preds_numpy is empty, then y_meta, xgb_aligned, lgb_aligned should also be empty.
-        if len(stk_meta_preds_numpy) == 0: # No data for stockformer path
-            print("No data for stockformer path in meta-learner. Attempting meta-learner with full XGB/LGB preds if possible.")
-            # This case would mean X_val was shorter than seq_len.
-            # The issue's example doesn't deeply cover this edge case for meta-learner construction.
-            # For now, if this happens, meta learner might not be trained.
-            X_meta = np.array([]) # Empty, so meta won't be trained
-        else: # Some other mismatch, try to proceed but warn
+        if len(stk_meta_preds_numpy) == 0:
+            print("No data for stockformer path in meta-learner.")
+            # Decide if meta-learner can be trained with only XGB/LGB if they exist and have enough samples
+            # For simplicity, if STK path is empty, assume meta-learner cannot be trained robustly as designed.
+            X_meta = np.array([])
+        else:
              min_len = min(len(xgb_meta_preds_aligned), len(lgb_meta_preds_aligned), len(stk_meta_preds_numpy), len(y_meta))
-             xgb_meta_preds_aligned = xgb_meta_preds_aligned[:min_len]
-             lgb_meta_preds_aligned = lgb_meta_preds_aligned[:min_len]
-             stk_meta_preds_numpy = stk_meta_preds_numpy[:min_len]
-             y_meta = y_meta[:min_len]
-             print(f"Adjusted meta-learner input arrays to min_len: {min_len}")
-             if min_len == 0: X_meta = np.array([])
-             else: X_meta = np.column_stack([xgb_meta_preds_aligned, lgb_meta_preds_aligned, stk_meta_preds_numpy])
-    elif len(y_meta) == 0 : # If y_meta is empty (e.g. X_val was too short for any STK preds)
-        print("Meta-learner training skipped: No data available for y_meta (X_val likely too short).")
-        X_meta = np.array([]) # Empty, so meta won't be trained
+             if min_len > 0:
+                 xgb_meta_preds_aligned = xgb_meta_preds_aligned[:min_len]
+                 lgb_meta_preds_aligned = lgb_meta_preds_aligned[:min_len]
+                 stk_meta_preds_numpy = stk_meta_preds_numpy[:min_len]
+                 y_meta = y_meta[:min_len]
+                 print(f"Adjusted meta-learner input arrays to min_len: {min_len}")
+                 X_meta = np.column_stack([xgb_meta_preds_aligned, lgb_meta_preds_aligned, stk_meta_preds_numpy])
+             else: # min_len is 0
+                 X_meta = np.array([])
+    elif len(y_meta) == 0 :
+        print("Meta-learner training skipped: No data available for y_meta (X_val likely too short for STK path or STK failed).")
+        X_meta = np.array([])
     else:
-        X_meta = np.column_stack([
-            xgb_meta_preds_aligned,
-            lgb_meta_preds_aligned,
-            stk_meta_preds_numpy
-        ])
+        X_meta = np.column_stack([xgb_meta_preds_aligned, lgb_meta_preds_aligned, stk_meta_preds_numpy])
 
     if X_meta.shape[0] > 0 and X_meta.shape[0] == len(y_meta):
-        meta = LogisticRegression(random_state=42).fit(X_meta, y_meta) # Added random_state
+        # Ensure LogisticRegression is imported or available
+        from sklearn.linear_model import LogisticRegression
+        meta = LogisticRegression(random_state=42).fit(X_meta, y_meta)
         models["meta"] = meta
-        # print("Meta-learner training complete.")
     else:
         print("Meta-learner training skipped: Input data (X_meta) is empty or mismatched with y_meta.")
         models["meta"] = None
@@ -264,74 +288,56 @@ def stacked_predict(models: dict, X_latest: np.ndarray) -> float:
     """ Predict calibrated probability for a single sample.
     X_latest must contain at least seq_len rows of feature history.
     """
-    import numpy as np # Local import for safety, though global is expected
-    import torch       # Local import for safety
+    import numpy as np
 
     # Ensure models dictionary contains necessary components
-    required_keys = ["xgb", "lgb", "meta", "seq_len"] # feature_cols is not directly used by predict
-    if not all(k in models for k in required_keys):
-        print("Warning: `models` dictionary in stacked_predict is missing key components (xgb, lgb, meta, or seq_len).")
-        # `stk` model might be missing if models.get("meta_stk_fallback") is True
-        if not models.get("meta_stk_fallback", False) and "stk" not in models:
-            print("Warning: `stk` model missing and meta_stk_fallback is not set. Prediction might be unreliable.")
-        # Depending on strictness, could return 0.0 or raise error
-        return 0.0 # Return neutral/error probability
+    # Check for actual model objects, not just keys that might be None
+    required_model_keys = ["xgb", "lgb", "meta"] # STK is optional depending on meta_stk_fallback
+    # Check if essential models are present and not None
+    essential_models_present = all(models.get(k) is not None for k in required_model_keys)
+    if not essential_models_present or "seq_len" not in models:
+        print("Warning: `models` dictionary in stacked_predict is missing key components (xgb, lgb, meta are None or seq_len missing).")
+        if not models.get("meta_stk_fallback", False) and not models.get("stk"):
+             print("Warning: `stk` model missing and meta_stk_fallback is not set. Prediction might be unreliable.")
+        return 0.0
 
-    # For XGB & LGBM, predict on the most recent set of features (the last row of X_latest)
-    # X_latest is expected to be (seq_len, n_features) for a single prediction context.
     if X_latest.ndim != 2:
         raise ValueError(f"X_latest must be a 2D array (seq_len, n_features), got {X_latest.ndim}D")
 
-    xgb_lgb_input = X_latest[-1:, :] # Takes the last row, keeps it 2D for predict_proba
+    xgb_lgb_input = X_latest[-1:, :]
 
-    xgb_p = models["xgb"].predict_proba(xgb_lgb_input)[:,1] # Should be (1,)
-    lgb_p = models["lgb"].predict_proba(xgb_lgb_input)[:,1] # Should be (1,)
+    xgb_p = models["xgb"].predict_proba(xgb_lgb_input)[:,1] if models.get("xgb") else np.array([0.5])
+    lgb_p = models["lgb"].predict_proba(xgb_lgb_input)[:,1] if models.get("lgb") else np.array([0.5])
 
-    stk_p_item = 0.5 # Default neutral if stk not used or fails
-
-    if models.get("stk") and not models.get("meta_stk_fallback", False) :
+    stk_p_item = 0.5 # Default
+    if models.get("stk") and not models.get("meta_stk_fallback", False) and ('torch' in globals() or 'torch' in locals()):
+        import torch # Ensure torch is available
         seq_len = models["seq_len"]
         if X_latest.shape[0] < seq_len:
-            print(f"Warning: X_latest has {X_latest.shape[0]} rows, less than seq_len {seq_len}. STK prediction might be unreliable or fail.")
-            # Fallback, or could raise error earlier
-
-        # Stockformer expects input [batch, seq_len, n_features]
-        # X_latest should be (seq_len, n_features), so unsqueeze to (1, seq_len, n_features)
-        # Take the last `seq_len` rows from X_latest. If X_latest is already exactly (seq_len, n_features), this is fine.
-        # If X_latest has more than seq_len rows, this ensures we take the correct slice.
-        stk_input_np = X_latest[-seq_len:, :]
-        if stk_input_np.shape[0] != seq_len: # Should ideally not happen if X_latest is prepared correctly
-             print(f"Warning: STK input shape {stk_input_np.shape} after slicing for seq_len {seq_len} is not as expected. Using fallback for STK prediction.")
+            print(f"Warning: X_latest has {X_latest.shape[0]} rows, less than seq_len {seq_len}. STK prediction might be unreliable.")
         else:
-            xf_tensor = torch.tensor(stk_input_np, dtype=torch.float32).unsqueeze(0)
-            stk_p_tensor = models["stk"](xf_tensor) # Output is a tensor e.g., tensor([[0.123]])
-            stk_p_item = stk_p_tensor.item() # Convert to scalar Python float
-    elif models.get("meta_stk_fallback", False):
-        # print("Debug: Using fallback for STK prediction in stacked_predict due to meta_stk_fallback=True")
-        pass # stk_p_item remains 0.5
-    else: # stk model is None and meta_stk_fallback is False (should have been caught by initial check)
-        # print("Debug: STK model is None in stacked_predict. Using fallback for STK prediction.")
-        pass # stk_p_item remains 0.5
+            stk_input_np = X_latest[-seq_len:, :]
+            if stk_input_np.shape[0] == seq_len and stk_input_np.shape[1] > 0: # Also check for features
+                xf_tensor = torch.tensor(stk_input_np, dtype=torch.float32).unsqueeze(0)
+                stk_p_tensor = models["stk"](xf_tensor)
+                stk_p_item = stk_p_tensor.item()
+            elif stk_input_np.shape[1] == 0 :
+                 print(f"Warning: STK input has no features. Using fallback for STK prediction.")
+            else: # Shape mismatch
+                 print(f"Warning: STK input shape {stk_input_np.shape} after slicing for seq_len {seq_len} is not as expected. Using fallback for STK prediction.")
 
-
-    # Meta-learner input: needs to be a 2D array, e.g. (1, num_base_models)
-    # xgb_p, lgb_p are numpy arrays of shape (1,)
-    # stk_p_item is a scalar
-
-    # If meta_stk_fallback is True, the meta learner was trained without STK features.
-    # This part needs to align with how train_ensemble constructed X_meta.
-    # The issue's train_ensemble always includes a value for STK in X_meta (even if it's a fallback 0.5).
-    # So, meta_in should always have 3 features.
     meta_in_list = [xgb_p[0], lgb_p[0], stk_p_item]
-    meta_in_array = np.array([meta_in_list]) # Reshape to (1, 3)
+    meta_in_array = np.array([meta_in_list])
 
     if models.get("meta"):
-        final_prob_array = models["meta"].predict_proba(meta_in_array)[:,1] # Should be (1,)
+        final_prob_array = models["meta"].predict_proba(meta_in_array)[:,1]
         final_prob = float(final_prob_array[0])
-    else:
-        print("Warning: Meta-learner model ('meta') is missing. Returning average of XGB and LGBM.")
-        # Fallback if meta model isn't available for some reason
-        final_prob = float((xgb_p[0] + lgb_p[0]) / 2.0)
+    else: # Meta model is missing (e.g. if training failed or all base models failed)
+        print("Warning: Meta-learner model ('meta') is missing. Returning average of available base models (or 0.5 if none).")
+        # Average available predictions, or 0.5 if none available
+        available_probs = [p[0] for p, m in [(xgb_p, models.get("xgb")), (lgb_p, models.get("lgb"))] if m is not None]
+        if stk_p_item != 0.5 and models.get("stk"): available_probs.append(stk_p_item)
+        final_prob = float(np.mean(available_probs)) if available_probs else 0.5
 
     return final_prob
 
@@ -348,6 +354,8 @@ SL_PCT          = 0.0035      # –0.35 % stop-loss
 STOP_PCT        = 0.0035      # hard stop 0.35 % (retained if used elsewhere, SL_PCT is for TBL)
 ATR_WIN         = 14
 # PROB_TH         = 0.60  # Deprecated: Thresholds are now per-regime and stored in the model bundle.
+MAX_RETRIES = 5
+INITIAL_BACKOFF_SECONDS = 10
 START_DATE      = (dt.date.today() - dt.timedelta(days=50)).isoformat()
 END_DATE        = dt.date.today().isoformat()
 ETF_LONG, ETF_SH = "SPXL", "SPXS"
@@ -365,6 +373,61 @@ GRID_STEPS  = 21               # 0 = spot, ±10 ticks of 0.1 %
 
 def download(tkr: str) -> pd.DataFrame:
     df_result = pd.DataFrame() # Initialize df_result as an empty DataFrame
+
+
+    for attempt_number in range(MAX_RETRIES):
+        try:
+            # --- TEMPORARY TEST CODE START ---
+            # (Code for Part 2 removed)
+            # --- TEMPORARY TEST CODE END ---
+            print(f"Attempt {attempt_number + 1} to download {tkr}...")
+            df_temp = yf.download(tkr, start=START_DATE, end=END_DATE,
+                                  interval=INTERVAL, progress=False, timeout=30) # Removed session=session
+
+            if not df_temp.empty:
+                df_result = df_temp
+                print(f"Successfully downloaded data for {tkr} on attempt {attempt_number + 1}.")
+                break  # Success, exit retry loop
+            else:
+                # yfinance returned empty df without raising an exception
+                print(f"Warning: No data downloaded for {tkr} (yf.download returned empty) on attempt {attempt_number + 1}. No retry for this case.")
+                break # No need to retry if yfinance returns empty without error
+
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e: # Removed yf.shared.YFRateLimitError
+            print(f"Warning: Attempt {attempt_number + 1}/{MAX_RETRIES} for {tkr} failed with error: {e}")
+            if attempt_number < MAX_RETRIES - 1:
+                delay = INITIAL_BACKOFF_SECONDS * (2 ** attempt_number)
+                print(f"Retrying {tkr} after {delay} seconds...")
+                time.sleep(delay)
+            else:
+                print(f"All {MAX_RETRIES} retries failed for {tkr}. Returning empty DataFrame.")
+                # df_result remains empty as initialized
+        except Exception as e:
+            # This catches other unexpected errors during yf.download or processing
+            error_str = str(e).lower()
+            # Check if it's a known retryable error type that might have been missed in the specific catch block
+            # This is a fallback, ideally specific exceptions are caught above.
+            is_potentially_retryable_error = ("yfratelimiterror" in error_str or
+                                   "too many requests" in error_str or
+                                   "rate limited" in error_str or
+                                   "429 client error" in error_str or
+                                   "connectionerror" in error_str or # Check for "connectionerror" string
+                                   "timeout" in error_str or # Check for "timeout" string
+                                   "temporary error" in error_str)
+
+            if is_potentially_retryable_error and attempt_number < MAX_RETRIES - 1:
+                print(f"Warning: Attempt {attempt_number + 1}/{MAX_RETRIES} for {tkr} failed with a potentially retryable error: {e}")
+                delay = INITIAL_BACKOFF_SECONDS * (2 ** attempt_number)
+                print(f"Retrying {tkr} after {delay} seconds...")
+                time.sleep(delay)
+            elif is_potentially_retryable_error and attempt_number == MAX_RETRIES - 1:
+                 print(f"All {MAX_RETRIES} retries failed for {tkr} with a potentially retryable error: {e}. Returning empty DataFrame.")
+            else:
+                # Non-retryable error or last attempt for a generic exception
+                print(f"Failed to download data for {tkr} due to a non-retryable or unexpected error after {attempt_number + 1} attempts: {e}")
+                # df_result remains empty. We break here as this is outside the specific retry logic for ConnectionError etc.
+                break
+
     try:
         session = requests.Session()
         headers = {'User-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
@@ -394,6 +457,7 @@ def download(tkr: str) -> pd.DataFrame:
         else:
             # For any other exception during the download, wrap it in a ValueError.
             raise ValueError(f"Failed to download data for {tkr} due to an unexpected error: {e}")
+>>>>>>> main
 
     # Post-processing, only if df_result is not empty
     if not df_result.empty:
@@ -404,6 +468,11 @@ def download(tkr: str) -> pd.DataFrame:
             except TypeError as tz_e:
                 # This might happen if it's already naive but somehow df_result.index.tz was not None.
                 print(f"Note: Could not make timezone naive for {tkr} (already naive or other issue). Error: {tz_e}")
+
+            except Exception as e_tz: # Catch any other error during tz_localize
+                print(f"Warning: Error during tz_localize for {tkr}: {e_tz}. Proceeding with potentially tz-aware index.")
+
+
 
         # Flatten MultiIndex columns
         # Ensure columns is actually a MultiIndex and has levels to prevent errors
@@ -736,7 +805,7 @@ def dataset() -> pd.DataFrame:
     print("Starting dataset generation...") # Optional: for verbosity
     base = download(ETF_LONG) # download() is an existing helper in the script
     if base.empty:
-        print("Warning: Downloaded data is empty. Returning empty DataFrame.")
+        print(f"Error: Could not download base data for {ETF_LONG} after multiple retries. Dataset generation aborted.")
         return pd.DataFrame()
     print(f"Data downloaded. Shape: {base.shape}")
 
@@ -881,38 +950,43 @@ def price_scenario_prob(base_row: pd.Series,
 #         "eval_metric":  "logloss",
 #         "n_jobs":       -1,
 #     }
-#     model = xgb.XGBClassifier(**params)
+    # model = xgb.XGBClassifier(**params) # xgb would need to be imported
 #     model.fit(X_tr, y_tr)
 #     preds = model.predict(X_val)
 #     return -f1_score(y_val, preds)               # maximise F1
 
-# def _train_original_backup(df: pd.DataFrame) -> Tuple[xgb.XGBClassifier, IsotonicRegression, float, List[str]]:
+# def _train_original_backup(df: pd.DataFrame) -> Tuple[object, IsotonicRegression, float, List[str]]: # Type hint for model changed
+#     # import xgboost as xgb # Would be needed here
 #     feats = [c for c in df.columns if c not in ("target",)]
 #     X, y  = df[feats], (df["target"] == 1).astype(int)   # 1 = TP side
 #     X_tr, X_val, y_tr, y_val = train_test_split(X, y, test_size=0.20, shuffle=False)
 #
-#     study = optuna.create_study(direction="minimize", show_progress_bar=False)
-#     study.optimize(lambda t: optuna_objective(t, X_tr, y_tr, X_val, y_val), # This would now call the backup
-#                    n_trials=60, timeout=900)
+#     # study = optuna.create_study(direction="minimize", show_progress_bar=False)
+#     # study.optimize(lambda t: optuna_objective(t, X_tr, y_tr, X_val, y_val), # This would now call the backup
+#     #                n_trials=60, timeout=900)
 #
-#     best_params = study.best_params
-#     best_params.update({"n_estimators": 600, "objective": "binary:logistic",
-#                         "eval_metric": "logloss", "n_jobs": -1})
-#     model = xgb.XGBClassifier(**best_params)
-#     model.fit(X_tr, y_tr)
+#     # best_params = study.best_params
+#     # best_params.update({"n_estimators": 600, "objective": "binary:logistic",
+#     #                     "eval_metric": "logloss", "n_jobs": -1})
+#     # model = xgb.XGBClassifier(**best_params) # This would fail if xgb not imported/installed
+#     model = None # Placeholder if XGBoost is not available
+#     print("Original backup training function called, but XGBoost part is effectively disabled if not installed.")
+#
 #
 #     # ----- probability calibration -------------------------------------------
-#     raw_val_prob = model.predict_proba(X_val)[:, 1]
-#     iso = IsotonicRegression(out_of_bounds="clip").fit(raw_val_prob, y_val)
-#     calib_prob   = iso.transform(raw_val_prob)
+#     # raw_val_prob = model.predict_proba(X_val)[:, 1] if model else np.zeros(len(y_val)) # Handle model=None
+#     # iso = IsotonicRegression(out_of_bounds="clip").fit(raw_val_prob, y_val)
+#     # calib_prob   = iso.transform(raw_val_prob)
+#     iso = IsotonicRegression(out_of_bounds="clip").fit(np.array([0,1]), np.array([0,1])) # Dummy if no model
+#     calib_prob = np.array([0.5] * len(y_val)) # Dummy if no model
 #
 #     # choose threshold that keeps historical win-rate ≥ 55 %
-#     thresh = np.quantile(calib_prob, 1 - y_val.mean())
+#     thresh = np.quantile(calib_prob, 1 - y_val.mean()) if len(y_val) > 0 and not np.all(calib_prob == 0.5) else 0.5
 #
 #     # report
 #     preds = (calib_prob > thresh).astype(int)
 #     acc   = accuracy_score(y_val, preds)
-#     prec, rec, f1, _ = precision_recall_fscore_support(y_val, preds, average="binary")
+#     prec, rec, f1, _ = precision_recall_fscore_support(y_val, preds, average="binary", zero_division=0)
 #     print(f"ACC {acc:.2f}  PREC {prec:.2f}  REC {rec:.2f}  F1 {f1:.2f}")
 #
 #     # persist three objects in one pickle
@@ -1329,7 +1403,17 @@ def main():
         if feats_df.empty or 'target' not in feats_df.columns:
             print("Error: Dataset is empty or 'target' column is missing. Aborting training.")
             # return # Or sys.exit(1) if appropriate in main context
-            bundle = {} # Assign empty bundle to prevent further errors if execution continues
+            # bundle = {} # Assign empty bundle to prevent further errors if execution continues
+            # The lines above are from the original code, the check for feats_df.empty is now more robust.
+        # else: # This else is removed as the check is now handled below
+        #     print(f"Dataset prepared. Shape: {feats_df.shape}")
+        #     all_cols = [c for c in feats_df.columns if c not in ("target",)]
+        # The lines above are from the original code, modification starts here.
+
+        # Check if dataset is valid for training
+        if feats_df.empty or 'target' not in feats_df.columns:
+            print("Error: Dataset is empty or 'target' column is missing. Aborting training.")
+            bundle = {} # Signal error / incomplete state for subsequent logic
         else:
             print(f"Dataset prepared. Shape: {feats_df.shape}")
             all_cols = [c for c in feats_df.columns if c not in ("target",)]
