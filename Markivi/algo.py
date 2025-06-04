@@ -107,6 +107,8 @@ class DataFetcher:
 
         for attempt in range(self.MAX_RETRIES):
             try:
+                # --- pacing to avoid 429 ---
+                time.sleep(random.uniform(*RATE_DELAY))
                 # For a single symbol, yfinance returns a DataFrame directly.
                 df = yf.download(symbol, period=period, interval=interval,
                                  progress=False, auto_adjust=False)
@@ -127,8 +129,6 @@ class DataFetcher:
 
                 df.to_parquet(cache_file, compression="zstd")
                 self._mem[key] = df
-                # --- pacing to avoid 429 ---
-                time.sleep(random.uniform(*RATE_DELAY))
                 return df
             except Exception as e:
                 error_type_name = type(e).__name__
