@@ -648,7 +648,64 @@ def schedule_signals_instructions():
 
 def run_signals_on_watchlist(): print("STUB: run_signals_on_watchlist called.")
 def backtest_watchlist(): print("STUB: backtest_watchlist called.")
-def show_signals_for_current_week(): print("STUB: show_signals_for_current_week called.")
+
+def show_signals_for_current_week():
+    """
+    Displays trading signals for the current week (Monday to Sunday).
+    """
+    all_predictions = load_predictions()
+
+    if not all_predictions:
+        print("No signals found.")
+        return
+
+    today = datetime.date.today()
+    start_of_week = today - datetime.timedelta(days=today.weekday())
+    end_of_week = start_of_week + datetime.timedelta(days=6)
+
+    current_week_signals = []
+    for signal in all_predictions:
+        if 'entry_date' not in signal:
+            continue  # Skip signals without an entry date
+
+        try:
+            entry_date_str = signal['entry_date']
+            # Handle potential datetime objects if load_predictions starts returning them
+            if isinstance(entry_date_str, datetime.datetime):
+                entry_date = entry_date_str.date()
+            elif isinstance(entry_date_str, datetime.date):
+                entry_date = entry_date_str
+            else:
+                entry_date = datetime.datetime.strptime(entry_date_str, "%Y-%m-%d").date()
+
+            if start_of_week <= entry_date <= end_of_week:
+                current_week_signals.append(signal)
+        except ValueError:
+            # Skip signals with invalid date format
+            print(f"Warning: Skipping signal for {signal.get('symbol', 'Unknown')} due to invalid date format: {signal['entry_date']}")
+            continue
+
+    if not current_week_signals:
+        print(f"No signals found for the current week ({start_of_week.strftime('%Y-%m-%d')} to {end_of_week.strftime('%Y-%m-%d')}).")
+        return
+
+    print(f"--- Signals for Current Week ({start_of_week.strftime('%Y-%m-%d')} to {end_of_week.strftime('%Y-%m-%d')}) ---")
+    for signal in current_week_signals:
+        direction_color = Fore.GREEN if signal.get('direction') == 'LONG' else Fore.RED
+        direction_str = signal.get('direction', 'N/A')
+        symbol_str = signal.get('symbol', 'N/A')
+        entry_price_str = f"${signal.get('entry_price', 0.0):.2f}"
+        stop_loss_str = f"${signal.get('stop_loss', 0.0):.2f}"
+        profit_target_str = f"${signal.get('profit_target', 0.0):.2f}"
+        entry_date_display_str = signal.get('entry_date', 'N/A')
+        # If entry_date was converted, ensure it's formatted back to string for display
+        if isinstance(entry_date_display_str, (datetime.date, datetime.datetime)):
+            entry_date_display_str = entry_date_display_str.strftime("%Y-%m-%d")
+
+
+        print(f"{symbol_str}: {direction_color}{direction_str}{Style.RESET_ALL} "
+              f"at {entry_price_str}, Stop {stop_loss_str}, Target {profit_target_str} "
+              f"(Entry: {entry_date_display_str})")
 
 # --- Urwid Dashboard for Signals Performance ---
 # Global/shared state for Urwid app
