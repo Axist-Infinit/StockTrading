@@ -1,0 +1,11 @@
+[
+  {
+    "symbol": "NVDA",
+    "entry_date": "2023-10-01",
+    "entry_price": 450.0,
+    "direction": "LONG",
+    "stop_loss": 440.0,
+    "profit_target": 460.0,
+    "status": "Open"
+  }
+]

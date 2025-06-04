@@ -1,0 +1,26 @@
+[
+  {
+    "symbol": "AAPL", "entry_date": "2023-09-01", "entry_price": 170.00, "direction": "LONG",
+    "stop_loss": 165.00, "profit_target": 180.00, "status": "Target",
+    "exit_date": "2023-09-05", "exit_price": 180.00, "pnl_pct": 5.88
+  },
+  {
+    "symbol": "MSFT", "entry_date": "2023-09-02", "entry_price": 330.00, "direction": "SHORT",
+    "stop_loss": 340.00, "profit_target": 320.00, "status": "Stop",
+    "exit_date": "2023-09-06", "exit_price": 340.00
+  },
+  {
+    "symbol": "GOOG", "entry_date": "2023-09-03", "entry_price": 135.00, "direction": "LONG",
+    "stop_loss": 130.00, "profit_target": 140.00, "status": "Closed",
+    "exit_date": "2023-09-07", "exit_price": 132.00
+  },
+  {
+    "symbol": "NVDA", "entry_date": "2023-10-01", "entry_price": 450.00, "direction": "LONG",
+    "stop_loss": 440.00, "profit_target": 460.00, "status": "Open"
+  },
+  {
+    "symbol": "TSLA", "entry_date": "2023-09-10", "entry_price": 250.00, "direction": "SHORT",
+    "stop_loss": 260.00, "profit_target": 240.00, "status": "Target",
+    "exit_date": "2023-09-15", "exit_price": 240.00, "pnl_pct": 4.00
+  }
+]
