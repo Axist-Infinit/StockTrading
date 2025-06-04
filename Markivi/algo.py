@@ -82,37 +82,79 @@ class Signal:
     timestamp:str
 
 class DataFetcher:
+    MAX_RETRIES = 3
+    INITIAL_BACKOFF_DELAY = 1  # seconds
+
     def __init__(self):
         self._mem: Dict[tuple, pd.DataFrame] = {}
 
-    def _hit(self, symbols: list[str], interval: str, period: str) -> pd.DataFrame:
-        """Download multiple symbols at once & obey local + disk cache."""
-        key = (tuple(symbols), interval)
+    def _hit(self, symbol: str, interval: str, period: str) -> pd.DataFrame:
+        """Download a single symbol & obey local + disk cache with retries."""
+        key = (symbol, interval)
         if key in self._mem:
+            # If already in memory cache (e.g. from a previous failed attempt), return it.
             return self._mem[key]
 
-        cache_file = CACHE_DIR / f"{'_'.join(symbols)}_{interval}.parq"
+        cache_file = CACHE_DIR / f"{symbol}_{interval}.parq"
         if cache_file.exists() and cache_file.stat().st_mtime > time.time() - 900:  # 15 min TTL
-            df = pd.read_parquet(cache_file)
-        else:
-            df = yf.download(symbols, period=period, interval=interval,
-                             progress=False, group_by="ticker", auto_adjust=False)
-            df.to_parquet(cache_file, compression="zstd")
-            # --- pacing to avoid 429 ---
-            time.sleep(random.uniform(*RATE_DELAY))
+            try:
+                df = pd.read_parquet(cache_file)
+                self._mem[key] = df # Also load to memory cache if read from disk
+                return df
+            except Exception as e:
+                print(f"[WARN] Failed to read Parquet cache file {cache_file}: {e}. Will attempt download.", file=sys.stderr)
 
-        self._mem[key] = df
-        return df
+
+        for attempt in range(self.MAX_RETRIES):
+            try:
+                # For a single symbol, yfinance returns a DataFrame directly.
+                df = yf.download(symbol, period=period, interval=interval,
+                                 progress=False, auto_adjust=False)
+                if df.empty and symbol not in WATCHLIST + [BENCHMARK]: # Allow empty for known symbols that might genuinely have no data for a period.
+                    # yf.download can return an empty df for legitimate reasons (e.g. delisted ticker partway through period)
+                    # However, if it's an unexpected symbol or consistently empty, it might indicate an issue.
+                    # For now, we treat truly empty DFs as potential issues to retry unless it's a known ticker.
+                    # This logic might need refinement based on yfinance behavior for various errors.
+                    # If a ticker genuinely has no data for the period, yfinance returns an empty DF with columns.
+                    # If a ticker does not exist, yfinance prints "No data found, symbol may be delisted" and returns an empty DF.
+                    print(f"[WARN] Empty DataFrame returned for {symbol} on attempt {attempt + 1}/{self.MAX_RETRIES}. Retrying...", file=sys.stderr)
+                    # Raising an exception to trigger retry logic for empty DFs on unexpected symbols or if we want to be more aggressive.
+                    # For now, let's only retry if yf.download itself fails, not if it returns an empty df.
+                    # If df.empty, we'll proceed to cache it. If it was due to an error yf didn't raise, this might hide issues.
+                    # Consider raising an error here if df is empty to force retry. For now, we let it pass.
+                    pass
+
+
+                df.to_parquet(cache_file, compression="zstd")
+                self._mem[key] = df
+                # --- pacing to avoid 429 ---
+                time.sleep(random.uniform(*RATE_DELAY))
+                return df
+            except Exception as e:
+                print(f"[WARN] Download failed for {symbol} ({interval}, {period}) on attempt {attempt + 1}/{self.MAX_RETRIES}. Error: {type(e).__name__}: {e}", file=sys.stderr)
+                if attempt < self.MAX_RETRIES - 1:
+                    delay = self.INITIAL_BACKOFF_DELAY * (2 ** attempt)
+                    print(f"Retrying in {delay}s...", file=sys.stderr)
+                    time.sleep(delay)
+                else:
+                    print(f"[ERROR] All retries failed for {symbol} ({interval}, {period}) after {self.MAX_RETRIES} attempts.", file=sys.stderr)
+                    df_empty = pd.DataFrame()
+                    self._mem[key] = df_empty # Cache empty DF to prevent immediate re-attempts
+                    return df_empty
+
+        # Should not be reached if logic is correct, but as a fallback:
+        df_fallback_empty = pd.DataFrame()
+        self._mem[key] = df_fallback_empty
+        return df_fallback_empty
+
 
     def bulk(self, symbols: list[str]) -> dict[str, dict[str, pd.DataFrame]]:
         out: Dict[str, Dict[str, pd.DataFrame]] = {s: {} for s in symbols}
         # sequential – much kinder to Yahoo
         for interval, period in TIMEFRAMES.items():
-            df_all = self._hit(symbols, interval, period)
-            # split the combined dataframe back into single-symbol chunks
             for sym in symbols:
-                part = df_all[sym] if isinstance(df_all.columns, pd.MultiIndex) else df_all
-                out[sym][interval] = part.dropna(how="all")
+                df_sym = self._hit(sym, interval, period)
+                out[sym][interval] = df_sym.dropna(how="all")
         return out
 
 class PatternDetector:
@@ -151,15 +193,63 @@ class PatternDetector:
         sub = df.tail(lookback)
         if len(sub) < lookback * 0.8:
             return 0.0
-        hi, lo, vol = sub["High"], sub["Low"], sub["Volume"]
-        rng_pct = (hi.max() - lo.min()) / hi.max()
-        range_score = max(0, 1 - rng_pct / 0.10)
+        hi_series, lo_series, vol_series = sub["High"], sub["Low"], sub["Volume"]
+
+        # Ensure scalar values for calculations
+        hi_max = float(hi_series.max())
+        lo_min = float(lo_series.min())
+
+        if hi_max == 0: # Avoid division by zero
+            rng_pct = float('inf') if lo_min < 0 else 0 # Or handle as appropriate
+        else:
+            rng_pct = (hi_max - lo_min) / hi_max
+
+        range_score = max(0.0, 1.0 - rng_pct / 0.10) # Ensure float literals
+
         idx = len(sub)
-        r1 = (hi[:idx//3].max() - lo[:idx//3].min()) / hi[:idx//3].max()
-        r2 = (hi[-idx//3:].max() - lo[-idx//3:].min()) / hi[-idx//3:].max()
-        contr_score = np.clip((r1 - r2) / max(r1, 1e-9), 0, 1)
-        vol_score = max(0, 1 - (vol.tail(lookback//3).mean() / vol.mean()))
-        comp = 3 / (1/range_score + 1/contr_score + 1/vol_score + 1e-9)
+
+        # Calculate r1
+        hi_r1_series = hi_series[:idx//3]
+        lo_r1_series = lo_series[:idx//3]
+        if hi_r1_series.empty or lo_r1_series.empty: # check if series are empty
+             r1 = float('inf') # or some other default value
+        else:
+             hi_r1_max = float(hi_r1_series.max())
+             lo_r1_min = float(lo_r1_series.min())
+             if hi_r1_max == 0:
+                 r1 = float('inf') if lo_r1_min < 0 else 0
+             else:
+                 r1 = (hi_r1_max - lo_r1_min) / hi_r1_max
+
+        # Calculate r2
+        hi_r2_series = hi_series[-idx//3:]
+        lo_r2_series = lo_series[-idx//3:]
+        if hi_r2_series.empty or lo_r2_series.empty: # check if series are empty
+             r2 = float('inf') # or some other default value
+        else:
+             hi_r2_max = float(hi_r2_series.max())
+             lo_r2_min = float(lo_r2_series.min())
+             if hi_r2_max == 0:
+                 r2 = float('inf') if lo_r2_min < 0 else 0
+             else:
+                 r2 = (hi_r2_max - lo_r2_min) / hi_r2_max
+
+        contr_score = np.clip((r1 - r2) / max(r1, 1e-9), 0, 1) if r1 != float('inf') and r2 != float('inf') else 0.0
+
+        vol_mean = float(vol_series.mean())
+        vol_tail_mean = float(vol_series.tail(lookback//3).mean())
+
+        if vol_mean == 0:
+            vol_score = 0.0 # Or handle as appropriate if mean volume is 0
+        else:
+            vol_score = max(0.0, 1.0 - (vol_tail_mean / vol_mean))
+
+        # Add small epsilon to denominators to prevent division by zero if scores are zero
+        range_score_safe = range_score if range_score > 1e-9 else 1e-9
+        contr_score_safe = contr_score if contr_score > 1e-9 else 1e-9
+        vol_score_safe = vol_score if vol_score > 1e-9 else 1e-9
+
+        comp = 3.0 / (1.0/range_score_safe + 1.0/contr_score_safe + 1.0/vol_score_safe)
         return round(comp * 100, 1)
 
     def rs_rank(self, df: pd.DataFrame) -> float:
@@ -175,14 +265,20 @@ class PatternDetector:
             print(f"[WARN] Not enough data for {sym} ({tf}) to detect patterns.", file=sys.stderr)
             return None
 
-        last = df_tf["Close"].iloc[-1]
-        # Explicitly cast hi to float to avoid Series ambiguity
-        hi = float(df_tf["High"].tail(20).max())
-        lo = df_tf["Low"].tail(20).min()
+        # Ensure last, hi, lo are scalar float values
+        try:
+            last = float(df_tf["Close"].iloc[-1])
+            hi = float(df_tf["High"].tail(20).max())
+            lo = float(df_tf["Low"].tail(20).min())
+        except IndexError:
+            # This can happen if df_tf is too short after .dropna(how="all") in _hit
+            print(f"[WARN] Not enough data for {sym} ({tf}) after basic processing to extract last/hi/lo. Skipping.", file=sys.stderr)
+            return None
+
 
         # Add checks for potential NaN values after max/min operations on potentially incomplete data
         if pd.isna(last) or pd.isna(hi) or pd.isna(lo):
-             print(f"[WARN] NaN values found for {sym} ({tf}). Skipping pattern detection.", file=sys.stderr)
+             print(f"[WARN] NaN values found for {sym} ({tf}) from last/hi/lo. Skipping pattern detection.", file=sys.stderr)
              return None
 
         if last < 0.95 * hi:
