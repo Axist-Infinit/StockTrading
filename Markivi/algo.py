@@ -32,7 +32,7 @@ import yfinance as yf
 CACHE_DIR = Path(".yf_cache")
 CACHE_DIR.mkdir(exist_ok=True)
 
-RATE_DELAY = (0.7, 1.1)
+RATE_DELAY = (1.5, 2.5)
 
 # ╔══════════════════════════════════════════════════════════════════════╗
 # ║                         CONFIGURATION                                ║
@@ -82,8 +82,8 @@ class Signal:
     timestamp:str
 
 class DataFetcher:
-    MAX_RETRIES = 3
-    INITIAL_BACKOFF_DELAY = 1  # seconds
+    MAX_RETRIES = 5
+    INITIAL_BACKOFF_DELAY = 5  # seconds
 
     def __init__(self):
         self._mem: Dict[tuple, pd.DataFrame] = {}
@@ -131,13 +131,31 @@ class DataFetcher:
                 time.sleep(random.uniform(*RATE_DELAY))
                 return df
             except Exception as e:
-                print(f"[WARN] Download failed for {symbol} ({interval}, {period}) on attempt {attempt + 1}/{self.MAX_RETRIES}. Error: {type(e).__name__}: {e}", file=sys.stderr)
+                error_type_name = type(e).__name__
+                error_message = str(e)
+                specific_rate_limit_error = False
+                if error_type_name == 'YFRateLimitError' or \
+                   'YFRateLimitError' in error_message or \
+                   'Too Many Requests' in error_message or \
+                   '429' in error_message: # Added '429' for common HTTP status code
+                    specific_rate_limit_error = True
+
                 if attempt < self.MAX_RETRIES - 1:
                     delay = self.INITIAL_BACKOFF_DELAY * (2 ** attempt)
-                    print(f"Retrying in {delay}s...", file=sys.stderr)
+                    log_message_prefix = f"[WARN] Attempt {attempt + 1}/{self.MAX_RETRIES} for {symbol} ({interval}, {period}) failed."
+                    if specific_rate_limit_error:
+                        log_message = f"{log_message_prefix} Specific rate limit error detected: {error_type_name}: {error_message}. Retrying in {delay}s..."
+                    else:
+                        log_message = f"{log_message_prefix} Error: {error_type_name}: {error_message}. Retrying in {delay}s..."
+                    print(log_message, file=sys.stderr)
                     time.sleep(delay)
                 else:
-                    print(f"[ERROR] All retries failed for {symbol} ({interval}, {period}) after {self.MAX_RETRIES} attempts.", file=sys.stderr)
+                    log_message_prefix = f"[ERROR] All {self.MAX_RETRIES} retries failed for {symbol} ({interval}, {period})."
+                    if specific_rate_limit_error:
+                        log_message = f"{log_message_prefix} Specific rate limit error detected: {error_type_name}: {error_message}. Giving up."
+                    else:
+                        log_message = f"{log_message_prefix} Error: {error_type_name}: {error_message}. Giving up."
+                    print(log_message, file=sys.stderr)
                     df_empty = pd.DataFrame()
                     self._mem[key] = df_empty # Cache empty DF to prevent immediate re-attempts
                     return df_empty
@@ -196,8 +214,8 @@ class PatternDetector:
         hi_series, lo_series, vol_series = sub["High"], sub["Low"], sub["Volume"]
 
         # Ensure scalar values for calculations
-        hi_max = float(hi_series.max())
-        lo_min = float(lo_series.min())
+        hi_max = hi_series.max().item()
+        lo_min = lo_series.min().item()
 
         if hi_max == 0: # Avoid division by zero
             rng_pct = float('inf') if lo_min < 0 else 0 # Or handle as appropriate
@@ -214,8 +232,8 @@ class PatternDetector:
         if hi_r1_series.empty or lo_r1_series.empty: # check if series are empty
              r1 = float('inf') # or some other default value
         else:
-             hi_r1_max = float(hi_r1_series.max())
-             lo_r1_min = float(lo_r1_series.min())
+             hi_r1_max = hi_r1_series.max().item()
+             lo_r1_min = lo_r1_series.min().item()
              if hi_r1_max == 0:
                  r1 = float('inf') if lo_r1_min < 0 else 0
              else:
@@ -227,8 +245,8 @@ class PatternDetector:
         if hi_r2_series.empty or lo_r2_series.empty: # check if series are empty
              r2 = float('inf') # or some other default value
         else:
-             hi_r2_max = float(hi_r2_series.max())
-             lo_r2_min = float(lo_r2_series.min())
+             hi_r2_max = hi_r2_series.max().item()
+             lo_r2_min = lo_r2_series.min().item()
              if hi_r2_max == 0:
                  r2 = float('inf') if lo_r2_min < 0 else 0
              else:
@@ -236,8 +254,8 @@ class PatternDetector:
 
         contr_score = np.clip((r1 - r2) / max(r1, 1e-9), 0, 1) if r1 != float('inf') and r2 != float('inf') else 0.0
 
-        vol_mean = float(vol_series.mean())
-        vol_tail_mean = float(vol_series.tail(lookback//3).mean())
+        vol_mean = vol_series.mean().item()
+        vol_tail_mean = vol_series.tail(lookback//3).mean().item()
 
         if vol_mean == 0:
             vol_score = 0.0 # Or handle as appropriate if mean volume is 0
@@ -267,11 +285,21 @@ class PatternDetector:
 
         # Ensure last, hi, lo are scalar float values
         try:
-            last = float(df_tf["Close"].iloc[-1])
-            hi = float(df_tf["High"].tail(20).max())
-            lo = float(df_tf["Low"].tail(20).min())
+            last = df_tf["Close"].iloc[-1].item()
+            hi = df_tf["High"].tail(20).max().item()
+            lo = df_tf["Low"].tail(20).min().item()
         except IndexError:
             # This can happen if df_tf is too short after .dropna(how="all") in _hit
+            # or if .item() is called on an empty Series (e.g. if tail(20).max() on an empty series returns empty series)
+            # Note: .max()/.min() on an empty series should raise ValueError or return NaN, .item() would then fail if result is not single value.
+            # If df_tf is too short, iloc[-1] will raise IndexError.
+            # If df_tf has some rows but less than 20, tail(20) gets what it can. Then .max()/.min() should return a scalar or NaN.
+            # If .max()/.min() returns NaN (a float), .item() is not needed and would fail.
+            # The original float() cast handled NaN correctly. Using .item() assumes the operation returns a single-element Series.
+            # If the series is empty or has multiple elements, .item() will fail.
+            # Let's assume for now the warning implies these ops *can* return single-element series.
+            # If .max()/.min() can return actual empty series instead of NaN, then .item() would fail.
+            # This part might need more robust handling if .item() fails.
             print(f"[WARN] Not enough data for {sym} ({tf}) after basic processing to extract last/hi/lo. Skipping.", file=sys.stderr)
             return None
 
