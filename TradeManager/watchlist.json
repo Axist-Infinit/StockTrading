@@ -1,0 +1,66 @@
+[
+  {
+    "rank": 1,
+    "ticker": "LEU",
+    "industry": "Uranium",
+    "buy_zone": "$130 – $135",
+    "stop_loss": "Below $125",
+    "profit_targets": ["$150", "$160"]
+  },
+  {
+    "rank": 2,
+    "ticker": "WPM",
+    "industry": "Gold",
+    "buy_zone": "$88 – $90",
+    "stop_loss": "Below $85",
+    "profit_targets": ["$95", "$100"]
+  },
+  {
+    "rank": 3,
+    "ticker": "RBLX",
+    "industry": "Electronic Gaming & Multimedia",
+    "buy_zone": "$88 – $90",
+    "stop_loss": "Below $85",
+    "profit_targets": ["$98", "$100"]
+  },
+  {
+    "rank": 4,
+    "ticker": "NRG",
+    "industry": "Independent Power Producers",
+    "buy_zone": "$154 – $158",
+    "stop_loss": "Below $145",
+    "profit_targets": ["$165", "$170"]
+  },
+  {
+    "rank": 5,
+    "ticker": "SBSW",
+    "industry": "Other Precious Metals & Mining",
+    "buy_zone": "$6.00 – $6.20",
+    "stop_loss": "Below $5.60",
+    "profit_targets": ["$6.80", "$7.00"]
+  },
+  {
+    "rank": 6,
+    "ticker": "TEL",
+    "industry": "Electronic Components",
+    "buy_zone": "$158 – $160",
+    "stop_loss": "Below $152",
+    "profit_targets": ["$168", "$170"]
+  },
+  {
+    "rank": 7,
+    "ticker": "CWEN",
+    "industry": "Utilities – Renewable",
+    "buy_zone": "$28.5 – $29.0",
+    "stop_loss": "Below $27.0",
+    "profit_targets": ["$31.0", "$32.0"]
+  },
+  {
+    "rank": 8,
+    "ticker": "MAG",
+    "industry": "Silver",
+    "buy_zone": "N/A (M&A locked)",
+    "stop_loss": "N/A",
+    "profit_targets": ["$20.54 (deal price)"]
+  }
+]
