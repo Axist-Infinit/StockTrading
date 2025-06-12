@@ -97,15 +97,6 @@ def load_config(section: str | None = None) -> dict | str | None:
     # return all options in that section as a plain dict
     return {k: v for k, v in cfg.items(section)}
 
-def load_secrets(file_name: str = "etrade_secrets.ini") -> dict:
-    cfg = configparser.ConfigParser()
-    secrets_path = Path(__file__).resolve().parent / file_name
-    if not cfg.read(secrets_path, "utf-8-sig"):
-        raise FileNotFoundError(f"{file_name} not found at {secrets_path}")
-    if "ETRADE" not in cfg:
-        raise KeyError(f"[ETRADE] section not found in {secrets_path}")
-    return dict(cfg["ETRADE"])
-
 class ETradeClient:
     _BASE = "https://apisb.etrade.com"
 
@@ -219,22 +210,22 @@ class ETradeClient:
 # ── E*TRADE client (global singleton) ─────────────────────────────────
 _ET_CLIENT = None # Initialize to None
 try:
-    # Ensure etrade_secrets.ini is in Sectors/ alongside axist-sectors.py
-    _ET_SECRETS = load_secrets("etrade_secrets.ini")
-    if _ET_SECRETS: # Check if load_secrets returned a non-empty dict
+    # Ensure config.ini has [ETRADE] section alongside axist-sectors.py
+    _ET_SECRETS = load_config("ETRADE")
+    if _ET_SECRETS: # Check if load_config returned a non-empty dict
         _ET_CLIENT = ETradeClient(_ET_SECRETS)
         # Use existing g() for green color, assuming colorama is initialized
-        print(g("ETradeClient initialized successfully."))
+        print(g("ETradeClient initialized successfully from config.ini."))
     else:
         # Use existing r() for red color
-        print(r("[CRITICAL] E*TRADE secrets were not loaded properly (empty or False). ETradeClient not initialized."))
-except FileNotFoundError as e:
-    print(r(f"[CRITICAL] E*TRADE secrets file ('Sectors/etrade_secrets.ini') not found: {e}."))
-    print(r("Please create 'Sectors/etrade_secrets.ini' with your E*TRADE API credentials."))
-except KeyError as e: # Specific error for missing [ETRADE] section or keys within it
-    print(r(f"[CRITICAL] Error in E*TRADE secrets file ('Sectors/etrade_secrets.ini'): Missing key or section {e}."))
+        print(r("[CRITICAL] E*TRADE credentials from config.ini [ETRADE] section were not loaded properly (empty or False). ETradeClient not initialized."))
+except FileNotFoundError as e: # This exception might not be directly raised by load_config if config.ini is missing, but kept for safety.
+    print(r(f"[CRITICAL] E*TRADE configuration file ('Sectors/config.ini') not found: {e}."))
+    print(r("Please ensure 'Sectors/config.ini' exists and has an [ETRADE] section with your API credentials."))
+except KeyError as e: # Specific error for missing keys within [ETRADE] section
+    print(r(f"[CRITICAL] Error in E*TRADE configuration ('Sectors/config.ini' [ETRADE] section): Missing key {e}."))
 except Exception as e: # Catch any other unexpected errors during init
-    print(r(f"[CRITICAL] Failed to initialize ETradeClient due to an unexpected error: {e}"))
+    print(r(f"[CRITICAL] Failed to initialize ETradeClient due to an unexpected error with config.ini: {e}"))
 # ─────────────────────────────────────────────────────────────────────
 
 
