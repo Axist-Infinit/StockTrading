@@ -1575,11 +1575,15 @@ def backtest_strategy_intraday(ticker, start_date, end_date, macro_df,
         return
 
     trades_df = pd.DataFrame(trades)
-    summary   = _summarise_performance(trades_df, len(feat)) # len(feat) as total_bars
+    summary   = _summarise_performance(trades_df, len(feat))
 
-    pct = lambda x: f"{x*100:.2f}%" # Helper for formatting percentages
-    print(Fore.BLUE + f"\nIntraday Backtest Results for {ticker}" + Style.RESET_ALL +
-          f" ({start_date} → {end_date}):")
+    pct = lambda x: f"{x*100:.2f}%"
+    print(
+        Fore.BLUE
+        + f"\nIntraday Backtest Results for {ticker}"
+        + f" ({start_date} → {end_date}):"
+        + Style.RESET_ALL
+    )
     print(f"  Total trades        : {Fore.CYAN}{summary['total']}{Style.RESET_ALL}")
     print(f"  Win rate            : {Fore.CYAN}{pct(summary['win_rate'])}{Style.RESET_ALL}")
     print(f"  Avg P/L per trade   : {Fore.CYAN}{pct(summary['avg_pnl'])}{Style.RESET_ALL}")
