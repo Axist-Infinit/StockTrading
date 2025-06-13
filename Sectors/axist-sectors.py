@@ -1759,7 +1759,8 @@ def signals_performance_cli():
         print("No open positions. Run option 5 (Show This Weeks Signals) first to generate some."); return
 
     def _get_last_prices_etrade() -> dict[str, float]: # Renamed for clarity
-        syms = sorted(list(set(p["symbol"] for p in open_recs))) # Ensure syms is list
+        syms = sorted(list(set(p["symbol"] for p in open_recs)))
+        # Ensure syms is list
         if not syms: return {}
 
         if _ET_CLIENT:
