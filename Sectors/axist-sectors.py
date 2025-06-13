@@ -1579,8 +1579,8 @@ def backtest_strategy_intraday(ticker, start_date, end_date, macro_df,
 
     pct = lambda x: f"{x*100:.2f}%"
     print(
-cq3fyw-codex/fix-indentation-error-in-axist-sectors.py
-        Fore.BLUE
+        + f"\nIntraday Backtest Results for {ticker} "
+        + f"({start_date} → {end_date}):"
         + f"\nIntraday Backtest Results for {ticker}"
         + f" ({start_date} → {end_date}):"
         + Style.RESET_ALL
