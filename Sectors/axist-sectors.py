@@ -1575,7 +1575,7 @@ def backtest_strategy_intraday(ticker, start_date, end_date, macro_df,
         return
 
     trades_df = pd.DataFrame(trades)
-    summary   = _summarise_performance(trades_df, len(feat)) # len(feat) as total_bars
+    summary   = _summarise_performance(trades_df, len(feat))
 
     pct = lambda x: f"{x*100:.2f}%"
     print(
