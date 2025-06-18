@@ -854,6 +854,11 @@ def compute_anchored_vwap(df_1d):
     # Ensure unique dates so assignment by index succeeds
     df_1d = df_1d.loc[~df_1d.index.duplicated(keep="last")]
 
+    # Deduplicate index to avoid reindex errors
+    if df_1d.index.duplicated().any():
+        df_1d = df_1d.loc[~df_1d.index.duplicated(keep='first')].copy()
+main
+
     lookback_period = 252
     recent_period = df_1d.tail(lookback_period)
 
