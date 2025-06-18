@@ -173,10 +173,19 @@ class ETradeClient:
         api_params = {k: v for k, v in api_params.items() if v is not None}
         path = f"/v1/market/quote/{symbol}/historical.json"
 
-        try: js = self._req(path, params=api_params)
+        try:
+            js = self._req(path, params=api_params)
         except requests.exceptions.HTTPError as e:
-            print(r(f"ETrade API HTTPError for historical {symbol} {interval}: {e.response.status_code} {e.response.text if e.response else 'No response text'}"))
-            return pd.DataFrame()
+            if e.response is not None and e.response.status_code == 404:
+                alt_path = f"/v1/market/quote/{symbol}/timeseries.json"
+                try:
+                    js = self._req(alt_path, params=api_params)
+                except requests.exceptions.HTTPError as e2:
+                    print(r(f"ETrade API HTTPError for historical {symbol} {interval}: {e2.response.status_code} {e2.response.text if e2.response else 'No response text'}"))
+                    return pd.DataFrame()
+            else:
+                print(r(f"ETrade API HTTPError for historical {symbol} {interval}: {e.response.status_code} {e.response.text if e.response else 'No response text'}"))
+                return pd.DataFrame()
 
         rows_data = []
         if "QuoteData" in js and js["QuoteData"]:
@@ -526,7 +535,9 @@ def cached_download(ticker: str, start: str, end: str, interval: str) -> pd.Data
         new = alpaca_download(ticker, timeframe=interval, start=start, end=end)
         if not new.empty and new.index.tz is not None:
             new.index = new.index.tz_localize(None)
-        df = pd.concat([cached, new]).sort_index().drop_duplicates()
+        df = pd.concat([cached, new]).sort_index()
+        # ensure no duplicate timestamps survive
+        df = df.loc[~df.index.duplicated(keep="last")]
         _save_cache(df, ticker, interval)
     else:
         df = cached
@@ -840,9 +851,13 @@ def compute_anchored_vwap(df_1d):
     if df_1d.empty:
         return pd.Series(dtype=float)
 
+    # Ensure unique dates so assignment by index succeeds
+    df_1d = df_1d.loc[~df_1d.index.duplicated(keep="last")]
+
     # Deduplicate index to avoid reindex errors
     if df_1d.index.duplicated().any():
         df_1d = df_1d.loc[~df_1d.index.duplicated(keep='first')].copy()
+main
 
     lookback_period = 252
     recent_period = df_1d.tail(lookback_period)
