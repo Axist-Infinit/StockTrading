@@ -173,10 +173,19 @@ class ETradeClient:
         api_params = {k: v for k, v in api_params.items() if v is not None}
         path = f"/v1/market/quote/{symbol}/historical.json"
 
-        try: js = self._req(path, params=api_params)
+        try:
+            js = self._req(path, params=api_params)
         except requests.exceptions.HTTPError as e:
-            print(r(f"ETrade API HTTPError for historical {symbol} {interval}: {e.response.status_code} {e.response.text if e.response else 'No response text'}"))
-            return pd.DataFrame()
+            if e.response is not None and e.response.status_code == 404:
+                alt_path = f"/v1/market/quote/{symbol}/timeseries.json"
+                try:
+                    js = self._req(alt_path, params=api_params)
+                except requests.exceptions.HTTPError as e2:
+                    print(r(f"ETrade API HTTPError for historical {symbol} {interval}: {e2.response.status_code} {e2.response.text if e2.response else 'No response text'}"))
+                    return pd.DataFrame()
+            else:
+                print(r(f"ETrade API HTTPError for historical {symbol} {interval}: {e.response.status_code} {e.response.text if e.response else 'No response text'}"))
+                return pd.DataFrame()
 
         rows_data = []
         if "QuoteData" in js and js["QuoteData"]:
