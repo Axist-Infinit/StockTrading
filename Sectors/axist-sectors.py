@@ -840,6 +840,10 @@ def compute_anchored_vwap(df_1d):
     if df_1d.empty:
         return pd.Series(dtype=float)
 
+    # Deduplicate index to avoid reindex errors
+    if df_1d.index.duplicated().any():
+        df_1d = df_1d.loc[~df_1d.index.duplicated(keep='first')].copy()
+
     lookback_period = 252
     recent_period = df_1d.tail(lookback_period)
 
