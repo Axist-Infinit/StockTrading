@@ -345,6 +345,196 @@ def load_config(section: str | None = None) -> dict | str | None:
     # return all options in that section as a plain dict
     return {k: v for k, v in cfg.items(section)}
 
+class ETradeClient:
+    _BASE = "https://apisb.etrade.com"
+
+    def __init__(self, creds: dict):
+        self.ck = creds["consumer_key"]
+        self.cs = creds["consumer_secret"]
+        self.tok = creds["access_token"]
+        self.tok_sec = creds["access_token_secret"]
+        self.env = creds.get("env", "sandbox")
+        self._BASE = "https://api.etrade.com" if self.env == "prod" else "https://apisb.etrade.com"
+
+    def _req(self, path: str, params: dict | None = None) -> dict:
+        sess = OAuth1Session(self.ck, self.cs, self.tok, self.tok_sec)
+        url = f"{self._BASE}{path}"
+        filtered_params = {k: v for k, v in (params or {}).items() if v is not None}
+        resp = sess.get(url, params=filtered_params, timeout=30)
+        resp.raise_for_status()
+        return resp.json()
+
+    def get_quotes(self, symbols: Sequence[str]) -> dict[str, float]:
+        if not symbols: return {}
+        # Note: E*TRADE API quote limit is 25 symbols. Chunking needed for more.
+        path = f"/v1/market/quote/{','.join(symbols)}.json"
+        api_params = {"detailFlag": "INTRADAY"}
+        try:
+            js = self._req(path, params=api_params)
+        except requests.exceptions.HTTPError as e:
+            print(r(f"ETrade API HTTPError for quotes {symbols}: {e.response.status_code} {e.response.text if e.response else 'No response text'}"))
+            return {s: np.nan for s in symbols}
+
+        results = {s: np.nan for s in symbols}
+        if "QuoteResponse" not in js or "QuoteData" not in js["QuoteResponse"]:
+            print(r(f"Unexpected ETrade quote response for {symbols}: 'QuoteData' missing. Response: {js}"))
+            return results
+
+        q_root = js["QuoteResponse"]["QuoteData"]
+        if not isinstance(q_root, list):
+            if isinstance(q_root, dict) and "symbol" in q_root and q_root.get("all") and "lastTrade" in q_root["all"]:
+                try: results[q_root["symbol"]] = float(q_root["all"]["lastTrade"])
+                except: pass
+            else: print(r(f"ETrade QuoteData is not a list for {symbols}. Response: {q_root}"))
+            return results
+
+        for q_data in q_root:
+            if isinstance(q_data, dict) and "symbol" in q_data and q_data.get("all") and "lastTrade" in q_data["all"]:
+                try: results[q_data["symbol"]] = float(q_data["all"]["lastTrade"])
+                except (ValueError, TypeError): pass
+        return results
+
+    _ivl_map = {
+        "1d": ("daily", 1), "1wk": ("weekly", 1),
+        "15m": ("minute", 15), "30m": ("minute", 30),
+        "1h": ("minute", 60), "4h": ("minute", 60),
+    }
+
+    def get_bars(self, symbol: str, *, start: str | None, end: str | None,
+                 interval: str, limit: int | None = None) -> pd.DataFrame:
+        if interval not in self._ivl_map:
+            raise ValueError(f"Interval '{interval}' not supported. Supported: {list(self._ivl_map.keys())}")
+
+        orig_interval_req = interval
+        freq_type, freq_val = self._ivl_map[interval]
+
+        if orig_interval_req == "4h" and freq_val == 60:
+            # Using existing Fore and Style for color, assuming init(autoreset=True) is called
+            print(Fore.YELLOW + f"[WARN] ETradeClient: Interval '4h' mapped to '1h' (60 min) data for {symbol}." + Style.RESET_ALL)
+
+        api_params = {
+            "periodType": "custom",
+            "startDate": pd.Timestamp(start).strftime("%m%d%Y") if start else None,
+            "endDate": pd.Timestamp(end).strftime("%m%d%Y") if end else None,
+            "frequencyType": freq_type, "frequency": freq_val, "sortOrder": "ASC",
+        }
+        api_params = {k: v for k, v in api_params.items() if v is not None}
+        path = f"/v1/market/quote/{symbol}/historical.json"
+
+        try:
+            js = self._req(path, params=api_params)
+        except requests.exceptions.HTTPError as e:
+            if e.response is not None and e.response.status_code == 404:
+                alt_path = f"/v1/market/quote/{symbol}/timeseries.json"
+                try:
+                    js = self._req(alt_path, params=api_params)
+                except requests.exceptions.HTTPError as e2:
+                    print(r(f"ETrade API HTTPError for historical {symbol} {interval}: {e2.response.status_code} {e2.response.text if e2.response else 'No response text'}"))
+                    return pd.DataFrame()
+            else:
+                print(r(f"ETrade API HTTPError for historical {symbol} {interval}: {e.response.status_code} {e.response.text if e.response else 'No response text'}"))
+                return pd.DataFrame()
+
+        rows_data = []
+        if "QuoteData" in js and js["QuoteData"]:
+            if freq_type == "minute": # Check Intraday path
+                if "Intraday" in js["QuoteData"] and js["QuoteData"]["Intraday"] and "Row" in js["QuoteData"]["Intraday"]:
+                    rows_data = js["QuoteData"]["Intraday"]["Row"]
+            elif freq_type != "minute": # Check All path for daily/weekly
+                if "All" in js["QuoteData"] and js["QuoteData"]["All"] and "Row" in js["QuoteData"]["All"]:
+                    rows_data = js["QuoteData"]["All"]["Row"]
+
+        if not rows_data: return pd.DataFrame()
+
+        try:
+            df = pd.DataFrame([{
+                "Date": pd.Timestamp(r["dateTimeUTC"] // 1000, unit='s', tz='UTC'),
+                "Open": float(r["open"]), "High": float(r["high"]),
+                "Low": float(r["low"]), "Close": float(r["close"]),
+                "Volume": int(r["volume"])
+            } for r in rows_data])
+        except (TypeError, KeyError) as e: # Catch errors if row structure is unexpected
+            print(r(f"Error parsing ETrade historical data for {symbol} {interval}: {e}. Sample: {rows_data[0] if rows_data else 'no rows'}"))
+            return pd.DataFrame()
+
+        if df.empty: return df
+        df.set_index("Date", inplace=True)
+        df.index = df.index.tz_convert(None) # Convert to local, naive
+        if freq_type in ("daily", "weekly"): df.index = df.index.normalize() # Normalize to midnight for daily/weekly
+        df = df.sort_index() # Ensure data is sorted by date
+        return df.head(limit) if limit and not df.empty else df
+
+# ── E*TRADE client (global singleton) ─────────────────────────────────
+_ET_CLIENT = None # Initialize to None
+try:
+    # Ensure config.ini has [ETRADE] section alongside axist-sectors.py
+    _ET_SECRETS = load_config("ETRADE")
+    if _ET_SECRETS: # Check if load_config returned a non-empty dict
+        _ET_CLIENT = ETradeClient(_ET_SECRETS)
+        # Use existing g() for green color, assuming colorama is initialized
+        print(g("ETradeClient initialized successfully from config.ini."))
+    else:
+        # Use existing r() for red color
+        print(r("[CRITICAL] E*TRADE credentials from config.ini [ETRADE] section were not loaded properly (empty or False). ETradeClient not initialized."))
+except FileNotFoundError as e: # This exception might not be directly raised by load_config if config.ini is missing, but kept for safety.
+    print(r(f"[CRITICAL] E*TRADE configuration file ('Sectors/config.ini') not found: {e}."))
+    print(r("Please ensure 'Sectors/config.ini' exists and has an [ETRADE] section with your API credentials."))
+except KeyError as e: # Specific error for missing keys within [ETRADE] section
+    print(r(f"[CRITICAL] Error in E*TRADE configuration ('Sectors/config.ini' [ETRADE] section): Missing key {e}."))
+except Exception as e: # Catch any other unexpected errors during init
+    print(r(f"[CRITICAL] Failed to initialize ETradeClient due to an unexpected error with config.ini: {e}"))
+# ─────────────────────────────────────────────────────────────────────
+
+
+def alpaca_download(symbol: str, *,
+                    start: str | None = None,
+                    end:   str | None = None,
+                    timeframe: str = "1d", # This is a string e.g. "1d"
+                    limit: int | None = None) -> pd.DataFrame:
+    """Return a tz‑naïve OHLCV DataFrame from E*TRADE.""" # MODIFIED
+
+    if _ET_CLIENT is None:
+        print(r("ETradeClient not initialized. Cannot fetch E*TRADE data."))
+        return pd.DataFrame()
+
+    _inc_api_calls() # Increment API call counter
+    try:
+        # Assuming get_bars is compatible or will be adapted
+        bars = _ET_CLIENT.get_bars(symbol, start=start, end=end, interval=timeframe, limit=limit)
+    except Exception as e:
+        print(r(f"ETrade download error for {symbol} {timeframe}: {e}"))
+        return pd.DataFrame()
+
+    if bars.empty:
+        return bars
+
+    # Assuming ETradeClient returns data in a compatible format or it's handled in ETradeClient
+    # If 'symbol' column exists (from multi-symbol request), set it as index then droplevel
+    # This part might need adjustment based on ETradeClient's actual output
+    if 'symbol' in bars.columns: # This check might be E*TRADE specific or not needed
+        bars = bars.set_index('symbol', append=True).swaplevel(0, 1)
+        if isinstance(bars.index, pd.MultiIndex):
+            try:
+                bars = bars.loc[symbol]
+            except KeyError:
+                 return pd.DataFrame()
+
+    # Standardize column names if necessary (ETradeClient might do this already)
+    # bars.rename(columns={"open":"Open","high":"High","low":"Low",
+    #                      "close":"Close","volume":"Volume"}, inplace=True, errors='ignore')
+
+    # Ensure index is tz-naive (ETradeClient might do this already)
+    # if bars.index.tz is not None:
+    #    bars.index = bars.index.tz_localize(None)
+
+    # Ensure required columns are present, or return empty if not (adjust as per ETradeClient output)
+    # required_cols = ["Open", "High", "Low", "Close", "Volume"]
+    # if not all(col in bars.columns for col in required_cols):
+    #    print(r(f"Missing required OHLCV columns for {symbol} from E*TRADE. Got: {bars.columns.tolist()}"))
+    #    return pd.DataFrame()
+
+    return bars # Return as is, assuming ETradeClient.get_bars returns compatible DataFrame
+
 
 _API_CALL_COUNT = 0
 
@@ -911,6 +1101,10 @@ def compute_anchored_vwap(df_1d):
 
     # Ensure unique dates so assignment by index succeeds
     df_1d = df_1d.loc[~df_1d.index.duplicated(keep="last")]
+
+    # Deduplicate index to avoid reindex errors
+    if df_1d.index.duplicated().any():
+        df_1d = df_1d.loc[~df_1d.index.duplicated(keep='first')].copy()
 
     lookback_period = 252
     recent_period = df_1d.tail(lookback_period)
