@@ -30,8 +30,6 @@ import numpy as np
 import requests
 from requests_oauthlib import OAuth1Session
 from pathlib import Path
-# configparser is likely already imported or will be by load_config, ensure it's available
-# import configparser
 from typing import Sequence
 # import urwid # Commented out to avoid TUI issues
 
@@ -72,6 +70,256 @@ from fredapi import Fred
 import configparser
 import warnings
 warnings.filterwarnings('ignore', category=FutureWarning)
+
+# ──────────────────────────────────────────────────────────────────────
+#  UNIVERSAL BROKER LAYER
+# ──────────────────────────────────────────────────────────────────────
+import abc, traceback
+from pathlib import Path
+from typing import Sequence, Any
+
+class BrokerBase(abc.ABC):
+    """Common interface every concrete broker implementation must honour."""
+
+    @property
+    @abc.abstractmethod
+    def name(self) -> str: ...
+
+    @abc.abstractmethod
+    def get_quotes(self, symbols: Sequence[str]) -> dict[str, float]: ...
+
+    @abc.abstractmethod
+    def get_bars(
+        self, symbol: str, *, start: str | None, end: str | None,
+        interval: str, limit: int | None = None
+    ) -> pd.DataFrame: ...
+
+class ETradeClient(BrokerBase):
+    _IVL_MAP = {
+        "1d": ("daily",   1),
+        "1wk":("weekly",  1),
+        "15m":("minute", 15),
+        "30m":("minute", 30),
+        "1h": ("minute", 60),
+        "4h": ("minute", 60),  # maps to 1 h
+    }
+
+    def __init__(self, creds: dict[str, str]):
+        self._ck  = creds["consumer_key"]
+        self._cs  = creds["consumer_secret"]
+        self._tok = creds["access_token"]
+        self._sec = creds["access_token_secret"]
+        self._base = "https://api.etrade.com" if creds.get("env") == "prod" \
+                     else "https://apisb.etrade.com"
+
+    @property
+    def name(self) -> str:
+        return "E*TRADE"
+
+    def _req(self, path: str, params: dict | None = None) -> dict[str, Any]:
+        sess = OAuth1Session(self._ck, self._cs, self._tok, self._sec)
+        r = sess.get(f"{self._base}{path}", params=params, timeout=30)
+        r.raise_for_status()
+        return r.json()
+
+    def get_quotes(self, symbols: Sequence[str]) -> dict[str, float]:
+        if not symbols:
+            return {}
+        path = f"/v1/market/quote/{','.join(symbols)}.json"
+        js   = self._req(path, {"detailFlag": "INTRADAY"})
+        out  = {s: np.nan for s in symbols}
+        for q in js.get("QuoteResponse", {}).get("QuoteData", []):
+            try:
+                out[q["symbol"]] = float(q["all"]["lastTrade"])
+            except Exception:
+                pass
+        return out
+
+    def get_bars(self, symbol, *, start, end, interval, limit=None) -> pd.DataFrame:
+        if interval not in self._IVL_MAP:
+            raise ValueError(f"interval '{interval}' unsupported for E*TRADE")
+        ftype, fval = self._IVL_MAP[interval]
+        if interval == "4h":
+            print(Fore.YELLOW + f"[WARN] 4\u2009h requested \u2192 1\u2009h data returned for {symbol}" + Style.RESET_ALL)
+
+        params = {"periodType":"custom", "sortOrder":"ASC",
+                  "frequencyType": ftype, "frequency": fval}
+        if start: params["startDate"] = pd.Timestamp(start).strftime("%m%d%Y")
+        if end:   params["endDate"]   = pd.Timestamp(end).strftime("%m%d%Y")
+
+        try:
+            js = self._req(f"/v1/market/quote/{symbol}/historical.json", params)
+        except requests.HTTPError as e:
+            if e.response is not None and e.response.status_code == 404:
+                js = self._req(f"/v1/market/quote/{symbol}/timeseries.json", params)
+            else:
+                raise
+
+        node = ("Intraday" if ftype=="minute" else "All")
+        rows = js.get("QuoteData", {}).get(node, {}).get("Row", [])
+        if not rows:
+            return pd.DataFrame()
+        df = (pd.DataFrame([
+                {
+                    "Date":   pd.Timestamp(r["dateTimeUTC"]//1000, unit="s", tz="UTC"),
+                    "Open":   float(r["open"]),   "High": float(r["high"]),
+                    "Low":    float(r["low"]),    "Close":float(r["close"]),
+                    "Volume": int(r["volume"])
+                } for r in rows
+             ])
+             .set_index("Date")
+             .tz_convert(None)
+             .sort_index())
+        return df.head(limit) if limit else df
+
+class AlpacaClient(BrokerBase):
+    _IVL_MAP = {"15m":"15Min","30m":"30Min","1h":"60Min","4h":"1Hour",
+                "1d":"1Day","1wk":"1Week"}
+
+    def __init__(self, creds: dict[str,str]):
+        self._key = creds["key"]
+        self._sec = creds["secret"]
+        self._paper = str(creds.get("paper","true")).lower() in ("1","true","yes")
+        self._base = "https://paper-api.alpaca.markets" if self._paper else "https://api.alpaca.markets"
+        self._md   = "https://data.alpaca.markets/v2"
+
+    @property
+    def name(self):
+        return "Alpaca (paper)" if self._paper else "Alpaca"
+
+    def _hdr(self):
+        return {"APCA-API-KEY-ID": self._key,
+                "APCA-API-SECRET-KEY": self._sec}
+
+    def get_quotes(self, symbols):
+        out = {}
+        for sym in symbols:
+            try:
+                url = f"{self._md}/stocks/{sym}/trades/latest"
+                js  = requests.get(url, headers=self._hdr(), timeout=15).json()
+                out[sym] = float(js["trade"]["p"])
+            except Exception:
+                out[sym] = np.nan
+        return out
+
+    def get_bars(self, symbol, *, start, end, interval, limit=None):
+        if interval not in self._IVL_MAP:
+            raise ValueError("interval not supported for Alpaca")
+        url = f"{self._md}/stocks/{symbol}/bars"
+        params = {"timeframe": self._IVL_MAP[interval],
+                  "start": start, "end": end, "limit": limit}
+        js = requests.get(url, params=params, headers=self._hdr(), timeout=30).json()
+        rows = js.get("bars", [])
+        if not rows:
+            return pd.DataFrame()
+        df = (pd.DataFrame([
+                {"Date": pd.Timestamp(r["t"], unit="s"),
+                 "Open":r["o"],"High":r["h"],"Low":r["l"],
+                 "Close":r["c"],"Volume":r["v"]} for r in rows])
+              .set_index("Date").sort_index())
+        return df
+
+try:
+    from ibapi.client import EClient
+    from ibapi.wrapper import EWrapper
+    from ibapi.contract import Contract
+except ImportError:
+    EClient = EWrapper = object
+
+class IBKRClient(BrokerBase, EWrapper, EClient):
+    "Light-weight pull-only IBKR client (TWS / Gateway must be running)."
+
+    def __init__(self, cfg: dict[str,str]):
+        EWrapper.__init__(self); EClient.__init__(self, self)
+        self._host = cfg.get("host","127.0.0.1")
+        self._port = int(cfg.get("port",7497))
+        self._cid  = int(cfg.get("client_id",11))
+        self.connect(self._host, self._port, self._cid)
+        self._quotes: dict[int,float] = {}
+        self._bars  : dict[int,pd.DataFrame] = {}
+        self._nextId = 9001
+
+    @property
+    def name(self):
+        return "Interactive Brokers"
+
+    def _next(self):
+        self._nextId += 1
+        return self._nextId
+
+    def get_quotes(self, symbols):
+        out, ev = {}, threading.Event()
+        pending = len(symbols)
+        def _got(id_, tickType, price, _attribs):
+            nonlocal pending
+            if tickType == 4:
+                out[sym_map[id_]] = price
+                pending -= 1
+                if pending == 0:
+                    ev.set()
+        self.tickPrice = _got
+
+        sym_map = {}
+        for s in symbols:
+            cid = self._next()
+            sym_map[cid]=s
+            c = Contract(); c.symbol=s; c.secType="STK"; c.currency="USD"; c.exchange="SMART"
+            self.reqMktData(cid, c, "", False, False, [])
+        ev.wait(3)
+        for s in symbols:
+            out.setdefault(s, np.nan)
+        return out
+
+    def historicalData(self, reqId, bar):
+        self._bars[reqId].append(bar)
+
+    def historicalDataEnd(self, reqId, *_):
+        self._bars[reqId] = pd.DataFrame([
+            {"Date": pd.Timestamp(bar.date),
+             "Open": bar.open, "High": bar.high,
+             "Low": bar.low,  "Close": bar.close,
+             "Volume": bar.volume} for bar in self._bars[reqId]])\
+            .set_index("Date")
+        self.cancelHistoricalData(reqId)
+
+    def get_bars(self, symbol, *, start, end, interval, limit=None):
+        if interval not in ("1d","1wk","1h","30m","15m"):
+            raise ValueError("interval not supported for IBKR client")
+        dur = {"1d":"1 Y", "1wk":"5 Y", "1h":"180 D",
+               "30m":"90 D", "15m":"60 D"}[interval]
+        bar_size = {"1d":"1 day","1wk":"1 week","1h":"1 hour",
+                    "30m":"30 mins","15m":"15 mins"}[interval]
+        cid = self._next(); self._bars[cid]=[]
+        c = Contract(); c.symbol=symbol; c.secType="STK"; c.currency="USD"; c.exchange="SMART"
+        self.reqHistoricalData(cid, c, "", dur, bar_size, "TRADES", 1, 1, False, [])
+        time.sleep(2)
+        df = self._bars.pop(cid, pd.DataFrame())
+        return df.head(limit) if limit else df
+
+def _build_broker() -> BrokerBase:
+    cfg = configparser.ConfigParser()
+    cfg.read(Path(__file__).with_name("config.ini"), encoding="utf-8-sig")
+    active = cfg.get("BROKER","active", fallback="etrade").lower().strip()
+
+    try:
+        if active == "etrade":
+            return ETradeClient(dict(cfg["ETRADE"]))
+        if active == "alpaca":
+            return AlpacaClient(dict(cfg["ALPACA"]))
+        if active == "ibkr":
+            return IBKRClient(dict(cfg["IBKR"]))
+        print(r(f"[CRITICAL] Unknown broker '{active}', falling back to E*TRADE"))
+        return ETradeClient(dict(cfg["ETRADE"]))
+    except Exception as e:
+        print(r(f"[CRITICAL] Broker initialisation failed: {e}\n{traceback.format_exc()}"))
+        raise
+
+_BROKER = _build_broker()
+print(g(f"Using {_BROKER.name} back-end."))
+
+def broker_download(symbol, *, start=None, end=None, interval="1d", limit=None):
+    """Thin wrapper replacing the legacy alpaca_download helper."""
+    return _BROKER.get_bars(symbol, start=start, end=end, interval=interval, limit=limit)
 
 
 PREDICTIONS_FILE = "weekly_signals.json"
@@ -287,6 +535,7 @@ def alpaca_download(symbol: str, *,
 
     return bars # Return as is, assuming ETradeClient.get_bars returns compatible DataFrame
 
+
 _API_CALL_COUNT = 0
 
 def _inc_api_calls(n: int = 1) -> None:
@@ -351,9 +600,9 @@ def _safe_download(ticker, *, period=None, start=None, end=None,
         # translate Yahoo‑style period into limit (rough heuristic)
         days = int(period.rstrip("d")) if period.endswith("d") else None
         limit = None if days is None else max(5, days)
-        return alpaca_download(ticker, timeframe=interval, limit=limit)
+        return broker_download(ticker, interval=interval, limit=limit)
 
-    return alpaca_download(ticker, timeframe=interval, start=start, end=end)
+    return broker_download(ticker, interval=interval, start=start, end=end)
 
 
 def _interval_to_polygon(interval: str) -> tuple[int, str]:
@@ -423,7 +672,7 @@ def preload_interval_cache(symbols: list[str],
                            *,
                            batch_size: int = 4,    # kept for signature parity
                            pause_sec: float = 0.25) -> None:
-    """Warm the on-disk cache with recent bars using the E*TRADE client (via alpaca_download wrapper).
+    """Warm the on-disk cache with recent bars using the selected broker.
 
     Intervals:
         15-min & 30-min : last 60 days
@@ -448,7 +697,7 @@ def preload_interval_cache(symbols: list[str],
         start = (today - pd.Timedelta(days=days)).strftime("%Y-%m-%d")
         for sym in symbols:
             try:
-                df = alpaca_download(sym, timeframe=ivl, start=start)
+                df = broker_download(sym, interval=ivl, start=start)
                 _save_cache(df, sym, ivl)
             except Exception as e:
                 print(f"[WARN] Preload {sym}/{ivl} failed: {e}")
@@ -486,24 +735,23 @@ def _update_positions_status() -> None:
     unique_symbols = sorted(list({p["symbol"] for p in open_pos}))
 
     if unique_symbols:
-        # MODIFIED: Use _ET_CLIENT for quotes
-        if _ET_CLIENT:
+        if _BROKER:
             try:
-                _inc_api_calls() # Increment API call counter
-                price_map = _ET_CLIENT.get_quotes(unique_symbols)
+                _inc_api_calls()  # Increment API call counter
+                price_map = _BROKER.get_quotes(unique_symbols)
                 # Handle NaN values if get_quotes might return them for some symbols
                 for sym in unique_symbols:
                     if sym not in price_map or pd.isna(price_map[sym]):
                         # Fallback or error handling for symbols not found or NaN price
-                        print(r(f"Warning: Could not retrieve E*TRADE price for {sym}. Using entry price as fallback."))
+                        print(r(f"Warning: Could not retrieve price for {sym}. Using entry price as fallback."))
                         price_map[sym] = next(p["entry_price"] for p in open_pos if p["symbol"] == sym)
-            except Exception as e: # Broad exception for ETradeClient issues
-                print(r(f"ETradeClient error in _update_positions_status: {e}"))
-                # Fallback to entry price for all symbols if E*TRADE call fails
+            except Exception as e:
+                print(r(f"Broker error in _update_positions_status: {e}"))
+                # Fallback to entry price for all symbols if broker call fails
                 for sym_needed in unique_symbols:
                     price_map[sym_needed] = next(p["entry_price"] for p in open_pos if p["symbol"] == sym_needed)
         else:
-            print(r("ETradeClient not initialized. Falling back to entry prices for open positions."))
+            print(r("Broker not initialized. Falling back to entry prices for open positions."))
             for sym_needed in unique_symbols:
                 price_map[sym_needed] = next(p["entry_price"] for p in open_pos if p["symbol"] == sym_needed)
 
@@ -523,7 +771,7 @@ def _update_positions_status() -> None:
         save_predictions(preds)
 
 def cached_download(ticker: str, start: str, end: str, interval: str) -> pd.DataFrame:
-    """Disk cache for OHLCV data; network fetch now uses E*TRADE client via alpaca_download wrapper."""
+    """Disk cache for OHLCV data; network fetch now uses the broker layer."""
     cached = _load_cache(ticker, interval)
     if not cached.empty and cached.index.tz is not None:
         cached.index = cached.index.tz_localize(None)
@@ -532,7 +780,7 @@ def cached_download(ticker: str, start: str, end: str, interval: str) -> pd.Data
            pd.to_datetime(end)   > cached.index.max()
 
     if need:
-        new = alpaca_download(ticker, timeframe=interval, start=start, end=end)
+        new = broker_download(ticker, interval=interval, start=start, end=end)
         if not new.empty and new.index.tz is not None:
             new.index = new.index.tz_localize(None)
         df = pd.concat([cached, new]).sort_index()
@@ -590,7 +838,7 @@ def fetch_data(
             ).loc[start:end]    # slice back to the exact user range
 
         # ─ live mode ───────────────────────────────────────────────────
-        return alpaca_download(ticker, timeframe=ivl_str, limit=default_limit)
+        return broker_download(ticker, interval=ivl_str, limit=default_limit)
 
     # actual pulls ------------------------------------------------------
     df_15  = _get("15m", 60)
@@ -857,7 +1105,6 @@ def compute_anchored_vwap(df_1d):
     # Deduplicate index to avoid reindex errors
     if df_1d.index.duplicated().any():
         df_1d = df_1d.loc[~df_1d.index.duplicated(keep='first')].copy()
-main
 
     lookback_period = 252
     recent_period = df_1d.tail(lookback_period)
@@ -1215,7 +1462,7 @@ def get_macro_data(start: str,
     """
     Build a daily macro / cross-asset DataFrame **without yfinance**.
 
-    • Uses E*TRADE (via alpaca_download wrapper) for liquid ETF proxies (SPY, TIP, UUP, USO, HYG, TLT, etc.).
+    • Uses the active broker for liquid ETF proxies (SPY, TIP, UUP, USO, HYG, TLT, etc.).
     • Optional FRED add-ons (10-yr yield, 2-10 spread) still supported.
     • Caches the merged result per-day on disk.
     """
@@ -1242,14 +1489,14 @@ def get_macro_data(start: str,
         "TLT":  "TLT",
     }
     price_df = pd.DataFrame()
-    # Ensure start and end are valid date strings for alpaca_download
+    # Ensure start and end are valid date strings for broker_download
     start_str = pd.Timestamp(start).strftime('%Y-%m-%d')
     end_str = pd.Timestamp(end).strftime('%Y-%m-%d')
 
     for etf, col in etf_map.items():
         try:
             # Pass timeframe="1d" explicitly
-            df = alpaca_download(etf, timeframe="1d", start=start_str, end=end_str)
+            df = broker_download(etf, interval="1d", start=start_str, end=end_str)
             if not df.empty and 'Close' in df.columns:
                  price_df[col] = df["Close"]
             else:
@@ -1624,8 +1871,8 @@ def run_signals_on_watchlist(use_intraday: bool = True): # Defaulting to True as
     if not tickers:
         print("Your watchlist is empty."); return
 
-    # Consider preloading cache if alpaca_download is still used by get_macro_data or directly
-    # preload_interval_cache(tickers) # This uses alpaca_download
+    # Consider preloading cache if broker_download is still used by get_macro_data or directly
+    # preload_interval_cache(tickers)
 
     today = datetime.date.today()
     # Ensure macro_df is fetched correctly
@@ -1638,7 +1885,7 @@ def run_signals_on_watchlist(use_intraday: bool = True): # Defaulting to True as
     for tkr in tickers:
         print(f"\n=== {tkr} (live) ===")
         try:
-            # Fetch data using the new ETrade client via alpaca_download wrapper
+            # Fetch data using the broker layer
             df15, df30, df1h, df4h, df1d, df1w = fetch_data(tkr)
         except Exception as e:
             print(r(f"Fetch error for {tkr}: {e}")); continue # Use r() for red
@@ -1700,13 +1947,13 @@ def backtest_watchlist():
     except ValueError:
         print(r("Invalid date format. Please use YYYY-MM-DD.")); return
 
-    # preload_interval_cache(tickers) # Uses alpaca_download
+    # preload_interval_cache(tickers)
 
     fred_api_key = load_config() # Load FRED key if needed for macro data
     macro_df = get_macro_data(start_arg, end_arg, fred_api_key=fred_api_key) # Pass key
     for ticker in tickers:
         print(f"\n=== Backtesting {ticker} from {start_arg} to {end_arg} ===")
-        # Assuming backtest_strategy is adapted for ETradeClient or still uses alpaca_download correctly
+        # Assuming backtest_strategy uses the broker layer
         backtest_strategy(ticker, start_arg, end_arg, macro_df)
 
 def show_signals_for_current_week():
@@ -1775,34 +2022,34 @@ def show_signals_for_current_week():
 
 def signals_performance_cli():
     """
-    Dashboard of OPEN trades – price updates fetched using ETradeClient.
+    Dashboard of OPEN trades – price updates fetched using the broker layer.
     """
     open_recs = [p for p in load_predictions() if p["status"] == "Open"]
     if not open_recs:
         print("No open positions. Run option 5 (Show This Weeks Signals) first to generate some."); return
 
-    def _get_last_prices_etrade() -> dict[str, float]: # Renamed for clarity
+    def _get_last_prices_broker() -> dict[str, float]:
         syms = sorted(list(set(p["symbol"] for p in open_recs)))
         # Ensure syms is list
         if not syms: return {}
 
-        if _ET_CLIENT:
+        if _BROKER:
             try:
                 _inc_api_calls() # Increment API call counter
-                prices = _ET_CLIENT.get_quotes(syms)
-                # Handle NaNs: if E*TRADE returns NaN, keep it to show data issue, or fallback
+                prices = _BROKER.get_quotes(syms)
+                # Handle NaNs: if the broker returns NaN, keep it to show data issue, or fallback
                 valid_prices = {s: p for s, p in prices.items() if not pd.isna(p)}
                 if len(valid_prices) < len(syms):
-                    print(r(f"Warning: Could not get E*TRADE prices for all symbols. Missing: {set(syms) - set(valid_prices.keys())}"))
+                    print(r(f"Warning: Could not get prices for all symbols. Missing: {set(syms) - set(valid_prices.keys())}"))
                 # Fallback for missing symbols (though get_quotes should ideally handle this)
                 for s_missed in set(syms) - set(valid_prices.keys()):
                     valid_prices[s_missed] = next((rec["entry_price"] for rec in open_recs if rec["symbol"] == s_missed), np.nan)
                 return valid_prices
             except Exception as e:
-                print(r(f"ETradeClient error in _get_last_prices_etrade: {e}"))
+                print(r(f"Broker error in _get_last_prices_broker: {e}"))
         else:
-            print(r("ETradeClient not initialized. Cannot fetch live prices."))
-        # Fallback if ETrade client fails or not initialized
+            print(r("Broker not initialized. Cannot fetch live prices."))
+        # Fallback if broker fails or not initialized
         return {p["symbol"]: p["entry_price"] for p in open_recs}
 
 
@@ -1840,7 +2087,7 @@ def signals_performance_cli():
 
 
     def _refresh_print(*_):
-        prices = _get_last_prices_etrade()
+        prices = _get_last_prices_broker()
         _build_table_print(prices)
 
     _refresh_print() # Initial display
@@ -2069,7 +2316,7 @@ def main():
         for ticker in tickers_to_process:
             print(f"\n=== Processing {ticker} (live signal mode{' - Intraday' if use_intraday_live else ''}) ===")
             try:
-                df15, df30, df1h, df4h, df1d, df1w = fetch_data(ticker) # Uses ETrade via alpaca_download
+                df15, df30, df1h, df4h, df1d, df1w = fetch_data(ticker)  # Uses broker layer
             except Exception as e:
                 print(r(f"Error fetching data for {ticker}: {e}"))
                 continue
