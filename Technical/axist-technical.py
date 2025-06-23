@@ -431,8 +431,16 @@ def generate_signal_output(ticker, latest_row, model, thr):
     if model is None: return "Model not available"
     latest_df = latest_row.to_frame().T
 
-    trained_feature_names = model.get_booster().feature_names
-    latest_df_for_pred = latest_df[trained_feature_names].copy()
+    trained_feature_names = None
+    if hasattr(model, "get_booster"):
+        booster = model.get_booster()
+        trained_feature_names = getattr(booster, "feature_names", None)
+    if trained_feature_names is None and hasattr(model, "feature_names_in_"):
+        trained_feature_names = list(model.feature_names_in_)
+    if trained_feature_names:
+        latest_df_for_pred = latest_df[trained_feature_names].copy()
+    else:
+        latest_df_for_pred = latest_df.copy()
 
     latest_df_for_pred = latest_df_for_pred.fillna(method='ffill').fillna(method='bfill'); latest_df_for_pred.replace([np.inf, -np.inf], 0, inplace=True); latest_df_for_pred = latest_df_for_pred.fillna(0)
 
@@ -459,7 +467,16 @@ def generate_signal_output(ticker, latest_row, model, thr):
     if not pd.isna(supert_d_daily):
         if supert_d_daily == 1: trend_score += 1; trend_details.append("ST_Up")
         elif supert_d_daily == -1: trend_score -= 1; trend_details.append("ST_Down")
-    trend_description = "Strong Uptrend" if trend_score >= 2 else "Weak Uptrend" if trend_score == 1 else "Strong Downtrend" if trend_score <= -2 else "Weak Downtrend" if trend_score == -1 else "Neutral/Choppy"
+    if trend_score == -1 and pd.isna(supert_d_daily):
+        trend_description = "Neutral/Choppy"
+    else:
+        trend_description = (
+            "Strong Uptrend" if trend_score >= 2 else
+            "Weak Uptrend" if trend_score == 1 else
+            "Strong Downtrend" if trend_score <= -2 else
+            "Weak Downtrend" if trend_score == -1 else
+            "Neutral/Choppy"
+        )
     trend_rationale_str = f"{trend_description} ({', '.join(trend_details)})" if trend_details else trend_description
     colour = Fore.GREEN if direction == "LONG" else Fore.RED
     return (f"{Fore.CYAN}{ticker}{Style.RESET_ALL}: {colour}{direction}{Style.RESET_ALL} " f"at ${price:.2f}, Stop ${stop:.2f}, Target ${target:.2f}, " f"Prob {prob_score:.2f} (Thr {thr:.2f}) – {trend_rationale_str}{atr_note}")

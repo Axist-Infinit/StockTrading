@@ -68,6 +68,7 @@ def b(text): return Fore.BLUE + str(text) + Style.RESET_ALL
 
 from fredapi import Fred
 import configparser
+import re
 import warnings
 warnings.filterwarnings('ignore', category=FutureWarning)
 
@@ -307,7 +308,8 @@ class IBKRClient(BrokerBase, EWrapper, EClient):
 def _build_broker() -> BrokerBase:
     cfg = configparser.ConfigParser()
     cfg.read(Path(__file__).with_name("config.ini"), encoding="utf-8-sig")
-    active = cfg.get("BROKER","active", fallback="etrade").lower().strip()
+    raw_active = cfg.get("BROKER", "active", fallback="etrade")
+    active = re.split(r"[;#]", raw_active, 1)[0].strip().lower()
 
     try:
         if active == "etrade":
