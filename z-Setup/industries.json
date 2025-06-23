@@ -1,219 +1,112 @@
-﻿{
-  "Advertising Agencies": ["BAOS","ISIG","MOBQ","TRKA","ICLK","STRN","ANTE","CNET","DRCT","INUV","SRAX","NCMI","HHS","XNET","WIMI","MCHX","ATY","FLNT","SCOR","DMS","TSQ","ADTH","QUOT","EEX","CTV","CCO","TRMR","CMPR","QNST","BOC","MGNI","DLX","ADV","IAS","CRTO","STGW","ZD","WPP","IPG","OMC"],
-  "Aerospace & Defense": ["SIF","AIRI","ASTC","DPRO","CVU","SIDU","AZ","UAVS","NILE","VTSI","TATT","CODA","MNTS","IVAC","BYRN","ISSC","ASTR","RDW","KITT","SKYH","EH","PKE","ATRO","POWW","LLAP","SWBI","RADA","LILM","KAMN","DCO","VSEC","TGI","ACHR","RGR","EVTL","CDRE","VORB","SPCE","VVX","KTOS","PL","AIR","ERJ","AVAV","RKLB","MOG-A","SPR","EVEX","MRCY","AJRD","HXL","BWXT","WWD","CAE","ESLT","HII","AXON","TXT","HEI","TDG","LHX","GD","NOC","BA","LMT","RTX"],
-  "Airlines": ["MESA","HA","SKYW","VLRS","AZUL","SNCY","ALGT","SAVE","JBLU","ULCC","CPA","GOL","ALK","AAL","CEA","UAL","ZNH","RYAAY","DAL","LUV"],
-  "Apparel Manufacturing": ["JXJT","EVK","XELB","JRSH","CRWS","LAKE","VNCE","DLA","SGC","FIGS","OXM","KTB","GOOS","HBI","ZGN","PVH","UA","COLM","GIL","LEVI","CPRI","RL","VFC"],
-  "Auto Manufacturers": ["AYRO","VLCN","PEV","VEV","EVTV","GP","SEV","SOLO","MULN","NIU","KNDI","ARVL","CENN","FFIE","BLBD","RIDE","GOEV","HYZN","WKHS","PTRA","LVWR","FSR","XPEV","PSNY","NIO","LI","TTM","LCID","RIVN","RACE","HMC","STLA","F","GM","TM","TSLA"],
-  "Banks - Diversified": ["NTB","EWBC","CS","NU","NWG","BCS","BBVA","SMFG","ING","CM","SAN","UBS","BNS","MUFG","BMO","C","HSBC","TD","RY","WFC","BAC","JPM"],
-  "Beverages - Brewers": ["SBEV","CCU","SAM","TAP","FMX","ABEV","BUD"],
-  "Beverages - Non-Alcoholic": ["REED","BRFH","WTER","ZVIA","COCO","OTLY","AKO-A","PRMW","FIZZ","COKE","CELH","KOF","CCEP","MNST","KDP","PEP","KO"],
-  "Building Materials": ["RETO","SMID","CPAC","USLM","LOMA","SUM","EXP","MDU","CX","JHX","MLM","VMC","CRH"],
-  "Business Equipment & Supplies": ["ACCO","PBI","EBF","SCS","HNI","VRTV","AVY"],
-  "Communication Equipment": ["SYTA","MINM","ASNS","MITQ","CLRO","BOSC","MOB","SONM","VISL","AMPG","OCC","WTT","UTSI","FKWL","BOXL","BKTI","TESS","FEIM","NTIP","AIRG","PCTI","PWFL","MYNA","ITI","CAMP","LTRX","ONDS","INSG","CRNT","ALLT","AKTS","KVHI","CASA","SILC","CMTL","GILT","AVNW","SATX","DZSI","TSAT","ITRN","NTGR","CMBM","AUDC","SWIR","CLFD","KN","DGII","INFN","SATS","ADTN","HLIT","MAXR","CRDO","COMM","EXTR","VIAV","VSAT","PI","LITE","CIEN","JNPR","ZBRA","UI","HPE","ERIC","NOK","MSI","CSCO"],
-  "Computer Hardware": ["SCKT","VJET","TACT","KTCC","EBON","RCAT","OSS","QUBT","MICT","ALOT","QMCO","DAKT","RGTI","INVE","STRC","QBTS","FATH","MKFG","CAN","VLD","NNDM","DM","SSYS","DDD","IONQ","CRSR","CRCT","SMCI","PSTG","LOGI","STX","WDC","NTAP","HPQ","DELL","CAJ","ANET"],
-  "Conglomerates": ["CETX","EFSH","GRNQ","IGC","NNBR","ALPP","FIP","TRC","MATW","SPLP","CODI","BBU","SEB","IEP"],
-  "Consulting Services": ["BWMN","RGP","FC","FORR","CRAI","HURN","ICFI","EXPO","FCN","TRU","BAH","EFX","VRSK","TRI"],
-  "Consumer Electronics": ["WLDS","MSN","MICS","UTME","VIOT","KOSS","ZEPP","HBB","HEAR","UEIC","VUZI","GPRO","IRBT","VZIO","SONO","LPL","SONY","AAPL"],
-  "Copper": ["IE","HBM","TRQ","SCCO","FCX"],
-  "Coking Coal": ["METC","SXC","HCC","AMR"],
-  "Specialty Chemicals": ["SNES","CRKN","FSI","GURE","CNEY","POL","VNTR","CMT","NTIC","LOOP","ODC","DNMR","ALTO","TG","HDSN","GEVO","KOP","TSE","AMRS","HWKN","LWLG","CCF","FEAM","OEC","KRO","ECVT","PRM","GPRE","WDFC","SCL","IOSP","AVNT","NGVT","SXT","NEU","KWR","FUL","CBT","ESI","BCPC","CC","AXTA","LTHM","OLN","RPM","WLK","AVTR","IFF","LYB","PPG","ALB","ECL","SHW","LIN"],
-  "Thermal Coal": ["AREC","HNRG","NC","NRP","CEIX","ARCH","ARLP","BTU"],
-  "Engineering & Construction": ["AGFY","OIG","DRTT","WLMS","ENG","ESOA","VATE","ORN","LMB","AENZ","HIL","RCMT","WLDN","ATCX","TPC","BBCP","GLDD","AGX","IESC","STRL","PRIM","GVA","MYRG","ROAD","NVEE","AMRC","DY","APG","FIX","FLR","BLD","STN","EME","MTZ","KBR","TTEK","ACM","J","PWR","JCI"],
-  "Uranium": ["CCJ", "DNN", "EU", "ISOU", "LEU", "NXE", "UEC", "URG", "UROY", "UUUU"],
-  "Utilities - Renewable": ["BEP", "BEPC", "BNRG", "CEG", "CREG", "CWEN", "CWEN-A", "EBR", "ELLO", "ENLT", "FLNC", "HTOO", "NRGV", "NXXT", "ORA", "RNW", "SAFX", "STEM", "SUUN", "VGAS", "WAVE", "XIFR"],
-  "Electronic Components": ["ALNT", "APH", "BELFB", "BHE", "CLS", "CPSH", "CTS", "DAIO", "DAKT", "DSWL", "ELTK", "FLEX", "FN", "GAUZ", "GLW", "HOLO", "IMTE", "JBL", "KN", "KOPN", "KULR", "LFUS", "LINK", "LPTH", "LYTS", "MEI", "MKDW", "MPTI", "MTEK", "NEON", "OLED", "OPTX", "OSIS", "OST", "OUST", "PLXS", "REFR", "RELL", "ROG", "SANM", "SELX", "SGMA", "TEL", "TTMI", "VICR", "WBX"],
-  "Capital Markets": ["ABTS", "AMRK", "ANY", "ARBK", "BGC", "BITF", "BMNR", "BTBT", "BTCS", "BTM", "CIFR", "CLSK", "CNCK", "COHN", "CRCL", "DEFT", "DOMH", "ETOR", "EVR", "FLD", "FRGE", "FUFU", "FUTU", "GLXY", "GREE", "GRYP", "GS", "GSIW", "HGBL", "HIVE", "HLI", "HOOD", "HUT", "IBKR", "IREN", "JEF", "LAZ", "LGHL", "LPLA", "MARA", "MATH", "MC", "MDBH", "MEGL", "MIGI", "MKTX", "MRX", "MS", "NCPL", "NCTY", "NMR", "OPY", "PIPR", "PJT", "PLUT", "PWP", "RIOT", "SCHW", "SF", "SIEB", "SLNH", "SNEX", "SOS", "SRL", "SWIN", "TIGR", "TOP", "TW", "VIRT", "WAI", "WULF", "XP", "ZBAI"],
-  "Silver": ["AG", "EXK", "MAG", "SVM"],
+{
+  "Advertising Agencies": ["ADTH", "ADV", "ANTE", "ATY", "BAOS", "BOC", "CCO", "CMPR", "CNET", "CRTO", "CTV", "DLX", "DMS", "DRCT", "EEX", "FLNT", "HHS", "IAS", "ICLK", "INUV", "IPG", "ISIG", "MCHX", "MGNI", "MOBQ", "NCMI", "OMC", "QNST", "QUOT", "SCOR", "SRAX", "STGW", "STRN", "TRKA", "TRMR", "TSQ", "WIMI", "WPP", "XNET", "ZD"],
+  "Aerospace & Defense": ["ACHR", "AIR", "AIRI", "AJRD", "ASTC", "ASTR", "ATRO", "AVAV", "AXON", "AZ", "BA", "BWXT", "BYRN", "CAE", "CDRE", "CODA", "CVU", "DCO", "DPRO", "EH", "ERJ", "ESLT", "EVEX", "EVTL", "GD", "HEI", "HII", "HXL", "ISSC", "IVAC", "KAMN", "KITT", "KTOS", "LHX", "LILM", "LLAP", "LMT", "MNTS", "MOG-A", "MRCY", "NILE", "NOC", "PKE", "PL", "POWW", "RADA", "RDW", "RGR", "RKLB", "RTX", "SIDU", "SIF", "SKYH", "SPCE", "SPR", "SWBI", "TATT", "TDG", "TGI", "TXT", "UAVS", "VORB", "VSEC", "VTSI", "VVX", "WWD"],
   "Agricultural Inputs": ["AVD", "BIOX", "CF", "CTVA", "ENFY", "FMC", "ICL", "IPI", "LVRO", "MOS", "NITO", "NTR", "SANW", "SEED", "SMG", "UAN"],
-  "Software - Infrastructure": ["ACIW", "AEVA", "AFRM", "AI", "AIOT", "AISP", "AKAM", "ALAR", "ALLT", "AMBR", "APPN", "ARAI", "ARBE", "ARQQ", "ATCH", "ATEN", "ATGL", "AUID", "AVDX", "AVPT", "BAND", "BASE", "BB", "BKKT", "BLIN", "BLZE", "BNAI", "BOX", "CALX", "CCSI", "CETX", "CFLT", "CGNT", "CHKP", "CINT", "CISO", "CLBT", "CORZ", "CPAY", "CRWD", "CRWV", "CSAI", "CSGS", "CYBR", "DAVA", "DBX", "DFDV", "DLO", "DOCN", "DOX", "DTSS", "DVLT", "EEFT", "EVCM", "EVTC", "EXOD", "FAAS", "FATN", "FFIV", "FIVN", "FLYW", "FOUR", "FTNT", "GB", "GCT", "GDDY", "GEN", "GPN", "GRRR", "GTLB", "HPAI", "HUBC", "IIIV", "IMXI", "INFA", "INTZ", "IOT", "JG", "KPLT", "KSPI", "KVYO", "LHSW", "LIDR", "LSAK", "MCRP", "MDB", "MLGO", "MOGO", "MQ", "MSAI", "MSFT", "NBIS", "NET", "NN", "NTCT", "NTNX", "NYAX", "ODD", "OKTA", "OLB", "ORCL", "OS", "OSPN", "PAGS", "PANW", "PATH", "PAY", "PAYO", "PAYS", "PDYN", "PGY", "PLTR", "PRGS", "PRTH", "PSFE", "QLYS", "RAMP", "RBRK", "RDWR", "REKR", "RELY", "RPAY", "RPD", "RVYL", "RXT", "RZLV", "S", "SABR", "SAIL", "SANG", "SNCR", "SNPS", "STNE", "SUPX", "TAOP", "TCX", "TDC", "TENB", "TIXT", "TLS", "TOST", "TUYA", "TWLO", "UBXG", "USIO", "VERI", "VHC", "VRAR", "VRNS", "VRNT", "VRSN", "WEX", "WIX", "XBP", "XNET", "XYZ", "YEXT", "ZENA", "ZETA", "ZS"],
+  "Airlines": ["AAL", "ALGT", "ALK", "AZUL", "CEA", "CPA", "DAL", "GOL", "HA", "JBLU", "LUV", "MESA", "RYAAY", "SAVE", "SKYW", "SNCY", "UAL", "ULCC", "VLRS", "ZNH"],
+  "Airports & Air Services": ["ASR", "CAAP", "OMAB", "PAC"],
+  "Aluminum": ["AA", "ACH", "CENX", "CSTM", "KALU"],
+  "Apparel Manufacturing": ["COLM", "CPRI", "CRWS", "DLA", "EVK", "FIGS", "GIL", "GOOS", "HBI", "JRSH", "JXJT", "KTB", "LAKE", "LEVI", "OXM", "PVH", "RL", "SGC", "UA", "VFC", "VNCE", "XELB", "ZGN"],
+  "Apparel Retail": ["AEO", "ANF", "BIRD", "BKE", "BOOT", "BURL", "CATO", "CHS", "CRI", "CTRN", "CURV", "DBGI", "DBI", "DLTH", "DXLG", "EXPR", "GCO", "GES", "GIII", "GPS", "JILL", "LULU", "LVLU", "ONON", "PLCE", "RENT", "ROST", "SCVL", "SMRT", "TJX", "TLYS", "URBN", "VSCO", "ZUMZ"],
+  "Asset Management": ["AB", "APAM", "ARES", "BAM", "BEN", "BLK", "BX", "CG", "CNS", "FHI", "GROW", "KKR", "OWL", "PAX", "TPG", "TROW", "VCTR"],
+  "Auto & Truck Dealerships": ["ABG", "ACVA", "AN", "CARS", "CRMT", "CZOO", "DRVN", "GPI", "JZXN", "KFS", "KMX", "KXIN", "LAD", "LAZY", "LOTZ", "PAG", "RENN", "RUSHA", "SAH", "SFT", "VRM"],
+  "Auto Manufacturers": ["ARVL", "AYRO", "BLBD", "CENN", "EVTV", "F", "FFIE", "FSR", "GM", "GOEV", "GP", "HMC", "HYZN", "KNDI", "LCID", "LI", "LVWR", "MULN", "NIO", "NIU", "PEV", "PSNY", "PTRA", "RACE", "RIDE", "RIVN", "SEV", "SOLO", "STLA", "TM", "TSLA", "TTM", "VEV", "VLCN", "WKHS", "XPEV"],
+  "Auto Parts": ["ADNT", "AEVA", "ALLG", "ALSN", "ALV", "AMV", "APTV", "AXL", "BWA", "CAAS", "CPS", "CTIB", "CVGI", "DAN", "DORM", "FRSX", "GGR", "GNTX", "GT", "GTXAP", "HLLY", "HYLN", "HZN", "ID", "INVZ", "LAZR", "LEA", "LIDR", "LKQ", "MBLY", "MGA", "MLR", "MNRO", "MOD", "MPAA", "PLOW", "QS", "SES", "SMP", "SRI", "STR", "STRT", "SUP", "SYPR", "TEN", "THRM", "UFAB", "VC", "VOXX", "WKSP", "WPRT", "XL", "XPEL"],
+  "Banks - Diversified": ["BAC", "BBVA", "BCS", "BMO", "BNS", "C", "CM", "CS", "EWBC", "HSBC", "ING", "JPM", "MUFG", "NTB", "NU", "NWG", "RY", "SAN", "SMFG", "TD", "UBS", "WFC"],
+  "Beverages - Brewers": ["ABEV", "BUD", "CCU", "FMX", "SAM", "SBEV", "TAP"],
+  "Beverages - Non-Alcoholic": ["AKO-A", "BRFH", "CCEP", "CELH", "COCO", "COKE", "FIZZ", "KDP", "KO", "KOF", "MNST", "OTLY", "PEP", "PRMW", "REED", "WTER", "ZVIA"],
+  "Beverages - Wineries & Distilleries": ["BF-B", "DEO", "EAST", "MGPI", "NAPA", "STZ", "VWE", "WVVI"],
+  "Broadcasting": ["AUD", "EVC", "GTN", "IHRT", "NWS", "NWSA", "NXST", "SBGI", "SSP", "TGNA"],
+  "Building Materials": ["CPAC", "CRH", "CX", "EXP", "JHX", "LOMA", "MDU", "MLM", "RETO", "SMID", "SUM", "USLM", "VMC"],
+  "Building Products & Equipment": ["AAON", "AOS", "AWI", "AZEK", "BLDR", "CARR", "JCI", "MAS", "OC", "TREX"],
+  "Business Equipment & Supplies": ["ACCO", "AVY", "EBF", "HNI", "PBI", "SCS", "VRTV"],
+  "Capital Markets": ["ABTS", "AMRK", "ANY", "ARBK", "BGC", "BITF", "BMNR", "BTBT", "BTCS", "BTM", "CIFR", "CLSK", "CNCK", "COHN", "CRCL", "DEFT", "DOMH", "ETOR", "EVR", "FLD", "FRGE", "FUFU", "FUTU", "GLXY", "GREE", "GRYP", "GS", "GSIW", "HGBL", "HIVE", "HLI", "HOOD", "HUT", "IBKR", "IREN", "JEF", "LAZ", "LGHL", "LPLA", "MARA", "MATH", "MC", "MDBH", "MEGL", "MIGI", "MKTX", "MRX", "MS", "NCPL", "NCTY", "NMR", "OPY", "PIPR", "PJT", "PLUT", "PWP", "RIOT", "SCHW", "SF", "SIEB", "SLNH", "SNEX", "SOS", "SRL", "SWIN", "TIGR", "TOP", "TW", "VIRT", "WAI", "WULF", "XP", "ZBAI"],
+  "Chemicals - Major Diversified": ["DD", "DOW", "EMN", "HUN"],
+  "Coking Coal": ["AMR", "HCC", "METC", "SXC"],
+  "Communication Equipment": ["ADTN", "AIRG", "AKTS", "ALLT", "AMPG", "ASNS", "AUDC", "AVNW", "BKTI", "BOSC", "BOXL", "CAMP", "CASA", "CIEN", "CLFD", "CLRO", "CMBM", "CMTL", "COMM", "CRDO", "CRNT", "CSCO", "DGII", "DZSI", "ERIC", "EXTR", "FEIM", "FKWL", "GILT", "HLIT", "HPE", "INFN", "INSG", "ITI", "ITRN", "JNPR", "KN", "KVHI", "LITE", "LTRX", "MAXR", "MINM", "MITQ", "MOB", "MSI", "MYNA", "NOK", "NTGR", "NTIP", "OCC", "ONDS", "PCTI", "PI", "PWFL", "SATS", "SATX", "SILC", "SONM", "SWIR", "SYTA", "TESS", "TSAT", "UI", "UTSI", "VIAV", "VISL", "VSAT", "WTT", "ZBRA"],
+  "Computer Hardware": ["ALOT", "ANET", "CAJ", "CAN", "CRCT", "CRSR", "DAKT", "DDD", "DELL", "DM", "EBON", "FATH", "HPQ", "INVE", "IONQ", "KTCC", "LOGI", "MICT", "MKFG", "NNDM", "NTAP", "OSS", "PSTG", "QBTS", "QMCO", "QUBT", "RCAT", "RGTI", "SCKT", "SMCI", "SSYS", "STRC", "STX", "TACT", "VJET", "VLD", "WDC"],
+  "Conglomerates": ["ALPP", "BBU", "CETX", "CODI", "EFSH", "FIP", "GRNQ", "IEP", "IGC", "MATW", "NNBR", "SEB", "SPLP", "TRC"],
+  "Consulting Services": ["BAH", "BWMN", "CRAI", "EFX", "EXPO", "FC", "FCN", "FORR", "HURN", "ICFI", "RGP", "TRI", "TRU", "VRSK"],
+  "Consumer Electronics": ["AAPL", "GPRO", "HBB", "HEAR", "IRBT", "KOSS", "LPL", "MICS", "MSN", "SONO", "SONY", "UEIC", "UTME", "VIOT", "VUZI", "VZIO", "WLDS", "ZEPP"],
+  "Copper": ["FCX", "HBM", "IE", "SCCO", "TRQ"],
+  "Credit Services": ["AFRM", "ALLY", "AXP", "COF", "DFS", "FOUR", "MA", "PAY", "PYPL", "SOFI", "SQ", "SYF", "UPST", "V"],
+  "Department Stores": ["CBD", "DDS", "JWN", "KSS", "M"],
+  "Diagnostics & Research": ["A", "CRL", "DGX", "EXAS", "GH", "ILMN", "LH", "NEOG", "NTRA", "PKI", "QDEL"],
+  "Drug Manufacturers - General": ["AZN", "BMY", "GSK", "JNJ", "LLY", "MRK", "NVO", "NVS", "PFE", "SNY"],
+  "Drug Manufacturers - Specialty & Generic": ["ALKS", "PRGO", "TEVA", "VTRS"],
+  "Education & Training Services": ["AACG", "APEI", "ATGE", "CHGG", "DAO", "DUOL", "EDU", "GOTU", "LINC", "LOPE", "LRN", "METX", "MYGR", "NAAS", "PRDO", "TAL", "TEDU", "UTI", "VSTA", "YQ"],
+  "Electrical Equipment & Parts": ["ABB", "AZZ", "EMR", "ENS", "ETN", "GE", "NVT", "ROK"],
+  "Electronic Components": ["ALNT", "APH", "BELFB", "BHE", "CLS", "CPSH", "CTS", "DAIO", "DAKT", "DSWL", "ELTK", "FLEX", "FN", "GAUZ", "GLW", "HOLO", "IMTE", "JBL", "KN", "KOPN", "KULR", "LFUS", "LINK", "LPTH", "LYTS", "MEI", "MKDW", "MPTI", "MTEK", "NEON", "OLED", "OPTX", "OSIS", "OST", "OUST", "PLXS", "REFR", "RELL", "ROG", "SANM", "SELX", "SGMA", "TEL", "TTMI", "VICR", "WBX"],
   "Electronic Gaming & Multimedia": ["BHAT", "DDI", "EA", "GAME", "GCL", "GDC", "GDEV", "GIGM", "GMGI", "GMHS", "GRVY", "GXAI", "MSGM", "MYPS", "NTES", "PLTK", "RBLX", "SKLZ", "SNAL", "SOHU", "TBH", "TRUG", "TTWO"],
-  "Utilities - Independent Power Producers": ["DGXX", "KEN", "NRG", "PAM", "TAC", "TLN", "VST"],
+  "Electronics & Computer Distribution": ["ARW", "AVT", "SNX"],
+  "Engineering & Construction": ["ACM", "AENZ", "AGFY", "AGX", "AMRC", "APG", "ATCX", "BBCP", "BLD", "DRTT", "DY", "EME", "ENG", "ESOA", "FIX", "FLR", "GLDD", "GVA", "HIL", "IESC", "J", "JCI", "KBR", "LMB", "MTZ", "MYRG", "NVEE", "OIG", "ORN", "PRIM", "PWR", "RCMT", "ROAD", "STN", "STRL", "TPC", "TTEK", "VATE", "WLDN", "WLMS"],
   "Gold": ["AAUC", "AEM", "AGI", "ARMN", "AU", "AUST", "B", "BTG", "CDE", "CGAU", "CMCL", "CNL", "CTGO", "DC", "DRD", "EGO", "EQX", "FNV", "FSM", "GAU", "GFI", "GLDG", "GORO", "GROY", "HMY", "HYMC", "IAG", "IAUX", "IDR", "KGC", "NAMM", "NEM", "NFGC", "NG", "NGD", "ODV", "OR", "ORLA", "PAAS", "PZG", "RGLD", "SA", "SAND", "SSRM", "THM", "TRX", "USAU", "VGZ", "WPM"],
-  "Insurance – Specialty": ["ACT","AGO","AMBC","AMSF","AXS","EIG","ESNT","FAF","FNF","ITIC","JRVR","MBI","MTG","NMIH","RDN","RYAN","TIPT"],
-  "Insurance Brokers": ["AIFU","AJG","AON","BRO","BWIN","CRD-A","CRD-B","CRVL","EHTH","ERIE","GOCO","GSHD","HUIZ","KG","MMC","RELI","SLQT","TIRX","TWFG","WTW","XHG","ZBAO"],
-  "Integrated Freight & Logistics": ["FDX","UPS","EXPD","CHRW","JBHT","GXO","XPO","RXO","LSTR","HUBG","FWRD","RLGT","ZTO","CRGO","JYD","SFWL","PSIG"],
-  "Internet Content & Information": ["GOOGL","GOOG","META","SNAP","PINS","BIDU","TME","WB","YY","BILI","YNDX","DIDI"],
-  "Lumber & Wood Production": ["WY","UFPI","LPX","WFG","BCC","RYN","PCH","NWGL"],
-  "Marine Shipping": ["ZIM","SBLK","EGLE","MATX","DAC","GSL","NMM","DSX","CMRE","GOGL","EGLE","GRIN","PANL","PXS","SBLK","TK"],
-  "Medical Care Facilities": ["UHS","HCA","THC","SEM","CYH","ACHC","DGX","GHM"],
-  "Medical Devices": ["ABT","MDT","ISRG","SYK","BSX","ZBH","EW","DXCM","ALGN","SWAV"],
-  "Medical Distribution": ["ABC","CAH","MCK","HSIC","OPCH","SNDX"],
-  "Medical Instruments & Supplies": ["TMO","DHR","PKI","ICU","CNMD","OFIX","NARI","ICUI","SILK","PRCT"],
-  "Metal Fabrication": ["STLD","NUE","X","CLF","CMC","AA","ATI","SIM","ZEUS"],
-  "Mortgage Finance": ["NLY","AGNC","RKT","PFSI","COOP","UWMC","OCN","EFC","PMT"],
-  "Oil & Gas Drilling": ["RIG","VAL","NE","BORR","PACD","HP","NBR","PTEN","ENSV","SDPI"],
-  "Other Industrial Metals & Mining": ["MP","SCCO","FCX","EGO","NGD","SA","GROY","RIO","VALE","NILSY"],
-  "Other Precious Metals & Mining": ["WPM","FNV","SAND","RGLD","AGI","NG","NEM","AEM","AUY","HL"],
-  "Packaged Foods": ["GIS","K","PEP","KO","CAG","HRL","KHC","SJM","CPB","MDLZ","TSN"],
-  "Paper & Paper Products": ["IP","WRK","PKG","GPK","SLVM","MERK","CLW","GLT","SWM"],
-  "Pharmaceutical Retailers": ["CVS","WBA","RAD","WMT","AMZN"],
-  "Pollution & Treatment Controls": ["TTEK","CWST","ECVT","HCCI","AQUA","CLVT","MTRX"],
-  "Publishing": ["NWSA","NWS","NYT","GCI","LRN","SCHL","EDU","BIDU"],
-    "Auto & Truck Dealerships": [
-    "JZXN","LOTZ","SFT","KXIN","VRM","LAZY","KFS","CZOO","CRMT","RENN",
-    "CARS","ACVA","SAH","GPI","RUSHA","ABG","DRVN","AN","LAD","PAG","KMX"
-  ],
-  "Auto Parts": [
-    "CTIB","UFAB","HZN","WKSP","FRSX","SYPR","ID","AMV","STRT","XL","SUP","CAAS",
-    "LIDR","CPS","WPRT","CVGI","VOXX","MLR","MPAA","HLLY","AEVA","HYLN","GTXAP",
-    "SRI","INVZ","GGR","PLOW","ALLG","SMP","MOD","AXL","MBLY","MNRO","TEN","XPEL",
-    "SES","THRM","DAN","DORM","LAZR","STR","GT","QS","ADNT","VC","ALSN","GNTX",
-    "ALV","LEA","BWA","LKQ","MGA","APTV"
-  ],
-  "Apparel Retail": [
-    "EXPR","RENT","CTRN","LVLU","JILL","CATO","DBGI","TLYS","DLTH","DXLG","BIRD",
-    "ZUMZ","PLCE","CURV","SMRT","GCO","SCVL","CHS","ANF","GIII","GES","DBI","BOOT",
-    "BKE","AEO","URBN","CRI","VSCO","GPS","ONON","BURL","ROST","LULU","TJX"
-  ],
-  "Department Stores": ["CBD","JWN","KSS","M","DDS"],
-  "Internet Retail": [
-    "PIK","IMBI","JFBR","MFH","OCG","IPW","MOGU","TKAT","SECO","WNW","JWEL","BOXD",
-    "NHTC","APRN","HOUR","TDUP","LITB","YJ","AKA","DIBS","HEPS","PRTS","RMBL",
-    "BZUN","RERE","JMIA","DTC","WISH","LQDT","NEGG","QRTEB","DADA","OSTK","FVRR",
-    "CVNA","POSH","RVLV","FTCH","GLBE","W","VIPS","ETSY","CHWY","EBAY","CPNG",
-    "MELI","JD","PDD","BABA","AMZN"
-  ],
-  "Leisure": [
-    "CNXA","BTN","NLS","DS","AOUT","ESCA","PLBY","BBIG","JAKK","ISPO","FXLV","CLAR",
-    "SPWH","FNKO","JOUT","OSW","XPOF","VSTO","SIX","LTH","MANU","FUN","YETI",
-    "GOLF","PTON","MODG","SEAS","BC","PLNT","MAT","HAS","POOL"
-  ],
-  "Lodging": ["INTG","MCG","GHG","SOND","WH","CHH","IHG","H","HTHT","HLT","MAR"],
-  "Luxury Goods": ["CTHR","BGI","FOSL","MOV","BRLT","MYTE","SIG","TPR"],
-  "Packaging & Containers": [
-    "TYDE","FFHL","TUP","KRT","PACK","MYE","UFPT","PTVE","OI","AMBP","GEF","SLGN",
-    "SON","BERY","REYN","ATR","GPK","SEE","WRK","CCK","PKG","IP","BALL","AMCR"
-  ],
-  "Personal Services": [
-    "EJH","MRM","RGS","XWEL","EM","WW","CSV","STON","ROVR","FRG","MED","DSEY","FTDR",
-    "MCW","BFAM","HRB","SCI","ROL"
-  ],
-  "Recreational Vehicles": [
-    "EZGO","HLBZ","FRZA","VEEE","FUV","VMAR","REE","MPX","MCFT","ONEW","MBUU","WGO",
-    "CWH","LCII","DOOO","FOXF","THO","PII","HOG"
-  ],
-  "Residential Construction": [
-    "HOV","HOVNP","BZH","LEGH","GRBK","DFH","MHO","CCS","TPH","CVCO","LGIH","MDC",
-    "KBH","MTH","TMHC","SKY","TOL","PHM","NVR","LEN-B","DHI"
-  ],
-  "Resorts & Casinos": [
-    "SLNA","FLL","CNTY","BVH","MSC","PLYA","BALY","GDEN","MCRI","MLCO","RRR","HGV",
-    "PENN","VAC","BYD","WYNN","MTN","CZR","MGM","LVS"
-  ],
-  "Restaurants": [
-    "GRIL","REBN","BTBD","BTB","YOSH","RAVE","GTIM","BFI","BDL","ARKR","TAST","RRGB",
-    "FATBB","PBPB","THCH","STKS","FRGI","NATH","NDLS","LOCO","BH","RUTH","CHUY",
-    "KRUS","DENN","RICK","BJRI","FWRG","DIN","EAT","ARCO","PTLO","JACK","CNNE",
-    "CAKE","PLAY","SG","SHAK","BLMN","CBRL","PZZA","WEN","WING","BROS","TXRH",
-    "ARMK","DPZ","DRI","QSR","YUMC","YUM","CMG","SBUX","MCD"
-  ],
-  "Oil & Gas Integrated": [
-    "XOM","CVX","SHEL","TTE","BP","EQNR","PBR","SU","E","IMO","CVE","EC","YPF","NFG",
-    "TGS","SLNG","VIVK","HNRA"
-  ],
-  "Oil & Gas E&P": [
-    "COP","CNQ","EOG","OXY","HES","WDS","FANG","DVN","CTRA","TPL","EQT","MRO","OVV",
-    "CHK","APA","AR","PR","RRC","SWN","MTDR","CHRD","CIVI","MUR","SM","MGY","VRN",
-    "VIST"
-  ],
-  "Oil & Gas Midstream": ["ENB","EPD","ET","WMB","OKE","KMI","MPLX","TRP","LNG","TRGP","CQP","PBA","WES","PAA","AM","DTM","ETRN","ENLC","FRO","STNG","PAGP","VNOM","TRMD","GLNG","EURN",    "HESM","INSW","KNTK","TNK","EE","DHT","LPG","GEL","GLP","FLNG","NVGS","TNP","TK","NGL","OSG","CLCO","PBT","SMLP","DLNG","MMLP","IMPP","BROG","TOPS","PXS","BPT","BANL","MARPS"],
-  "Oil & Gas Refining & Marketing": [
-    "MPC","PSX","VLO","DINO","IEP","VVV","PBF","SUN","UGP","CSAN","CVI","DKL","DK",
-    "WKC","PARR","CAPL","CLNE","SGU","AMTX","VTNR","AE"
-  ],
-  "Oil & Gas Equipment & Services": [
-    "SLB","BKR","HAL","TS","FTI","WFRD","NOV","CHX","VAL","TDW","WHD","LBRT","AROC",
-    "USAC","XPRO","KGS","OII","AESI","HLX","RES","ACDC","SLCA"
-  ],
-  "Real Estate - Diversified": ["HHH","JOE","STRS","CHCI","VINO"],
-  {
-  "Airports & Air Services": ["ASR","PAC","OMAB","CAAP"],
-  "Aluminum": ["AA","ACH","CENX","CSTM","KALU"],
-  "Asset Management": ["AB","APAM","ARES","BAM","BEN","BLK","BX","CG","KKR","TROW","VCTR","CNS","FHI","GROW","PAX","TPG","OWL"],
-  "Beverages - Wineries & Distilleries": ["STZ","BF-B","DEO","NAPA","MGPI","WVVI","VWE","EAST"],
-  "Broadcasting": ["TGNA","NXST","SBGI","IHRT","GTN","SSP","EVC","AUD","NWSA","NWS"],
-  "Building Products & Equipment": ["BLDR","MAS","OC","TREX","AZEK","AWI","AOS","JCI","CARR","AAON"],
-  "Chemicals - Major Diversified": ["DD","DOW","EMN","HUN"],
-  "Credit Services": ["V","MA","AXP","DFS","COF","SYF","ALLY","PYPL","SQ","UPST","AFRM","SOFI","FOUR","PAY"],
-  "Diagnostics & Research": ["A","DGX","LH","ILMN","CRL","PKI","NTRA","EXAS","GH","QDEL","NEOG"],
-  "Drug Manufacturers - General": ["JNJ","PFE","MRK","AZN","GSK","SNY","LLY","BMY","NVS","NVO"],
-  "Drug Manufacturers - Specialty & Generic": ["TEVA","VTRS","PRGO","ALKS"],
-  "Electrical Equipment & Parts": ["EMR","ETN","ABB","GE","NVT","ENS","AZZ","ROK"],
-  "Electronics & Computer Distribution": ["ARW","AVT","SNX"],
-  "Rental & Leasing Services": ["URI","HRI","HEES","CAR","HTZ","R","AL","AER","AYR","TRTN"],
-  "Scientific & Technical Instruments": ["KEYS","GRMN","FTV","COHR","ROP","BRKR","TDY","MTD"],
-  "Security & Protection Services": ["ADT","ALRM","NSSC","AXON","G"],
-  "Semiconductor Equipment & Materials": ["AMAT","ASML","LRCX","KLAC","TER","ACLS","AEIS","FORM","UCTT","VECO","ENTG","ICHR","ONTO","COHU","NVMI"],
-  "Semiconductors": ["NVDA","AMD","INTC","AVGO","QCOM","TXN","NXPI","ADI","ON","MU","MPWR","STM","MRVL","WOLF","SLAB","SYNA","DIOD","LSCC","MXL","SMTC"],
-  "Software - Application": ["ADBE","CRM","NOW","INTU","ADSK","DOCU","BILL","PAYC","SNOW","DDOG","MDB","SHOP","ZM","ABNB","NET","TWLO","ASAN","ESTC","TEAM","WDAY"],
-  "Solar": ["FSLR","ENPH","SEDG","RUN","NOVA","JKS","CSIQ","SPWR","DQ","MAXN","ARRY","SHLS","FTCI"].
-  {
-  "Education & Training Services": [
-    "AACG","APEI","ATGE","CHGG","DAO","DUOL","EDU","GOTU","LINC","LOPE",
-    "LRN","METX","MYGR","NAAS","PRDO","TEDU","TAL","UTI","VSTA","YQ"
-  ],
-  "Real Estate Services": [
-    "COMP","EXPI","JLL","CWK","CBRE","Z","ZG","RDFN","OPEN","HOUS",
-    "INVH","AMH","BEKE","FATH","CIGI","RMAX","SVT","MMI","DOUG","DFH",
-    "WE","HPP"
-  ],
-  "Specialty Industrial Machinery": [
-    "AOS","AWK","CSWI","CW","DC","DOV","FSS","GBX","GTLS","ITW",
-    "JBT","KAI","KMT","KOP","LNN","LTHM","MSA","NDSN","NOVT","NPO",
-    "OCIP","PUMP","RPM","RRX","SHMD","SLGN","SNA","SPXC","SWK","TS",
-    "TTC","TTI","WFG","WTS","XYL","ZWS"
-  ],
-  "Staffing & Employment Services": [
-    "ATSG","BBSI","BG","BBSI","CD",
-    "HSN","JOB","KFRC","KELYA","KELYB","MAN","RCM","TBI","TSGS",
-    "UP","ZIP"
-  ],
-  "Steel": [
-    "AA","ATI","CLF","CMC","NUE","PKX","RS","STLD","TMST","TS",
-    "TX","USAP","X"
-  ],
-  "Telecom Services": [
-    "AT","BEV","BT","CNSL","DTEGY","FTRNQ","LUMN","NOK","ORAN",
-    "T","TEF","TMUS","USM","VZ"
-  ],
-  "Textile Manufacturing": [
-    "CRWS","GIII","MHP","NTZ","TEX","TRC","ULBI"
-  ],
-  "Tobacco": ["BTI","IMBBY","MO","PM","RLX","TPB","UVV","VGR"],
-  "Tools & Accessories": [
-    "AAN","AEM","AOS","ATKR","CLX","CSTM","CR","DNOW","FAST","IR",
-    "ITT","MKC","MLI","SNA","SWK"
-  ],
-  "Travel Services": [
-    "ABNB","BKNG","CEL","DESP","EXPE","HRB","ONVC","TRIP","TNL","TZOO"
-  ],
-  "Trucking": [
-    "ARCB","CARB","CVLG","EXPD","JBHT","KNX","LSTR","ODFL",
-    "SAIA","USX","WERN","YELL"
-  ],
-  "Utilities - Diversified": [
-    "ALE","AEE","AEP","AVA","D","DUK","EVRG","EXC","FORTY","NWE",
-    "NI","PPL","SO","WEC"
-  ],
-  "Utilities - Regulated Electric": [
-    "AGR","BKH","EIX","ETR","FE","HawaiianElectric","IDA","MGEE",
-    "NEE","OGE","OTTR","PNM","POR","TE","XEL"
-  ],
-  "Utilities - Regulated Gas": [
-    "ATO","CMS","NI","NWN","OKE","SJI","SO","SR","UGI","WGL"
-  ],
-  "Waste Management": ["CWST","CLH","ECVT","EQ","HCCI","PCT","RSG","WM","WCN"],
-  "REIT - Diversified": ["AIRC","ALEX","BHR","BXP","CIO","CTO","FPI","GOOD","HPP","LADR","LAND","NYC","PECO","RLTY","STAR"],
-  "REIT - Healthcare Facilities": [
-    "CHCT","DOC","GMRE","HR","HTA","MPW","NHI","OHI","PEAK","SNR","UHT","VTR","WELL"],
-  "REIT - Hotel & Motel": [
-    "AHT","APLE","BHR","CHH","CLDT","DRH","HST","HT","INN","MDRR","PK","RLJ","RHP","SHO","XHR"],
-  "REIT - Industrial": [
-    "AMR","CTLP","DRE","EXR","FR","ILPT","INDS","IRON","PLD","PSA","STAG","TRNO"],
-  "REIT - Mortgage": [
-    "AGNC","ARR","BXMT","CIM","CMO","DX","EARN","IVR","LADR","NLY","NRZ","ORC","PMT","RWT","TWO"]
-}
-
-}
-
+  "Insurance – Specialty": ["ACT", "AGO", "AMBC", "AMSF", "AXS", "EIG", "ESNT", "FAF", "FNF", "ITIC", "JRVR", "MBI", "MTG", "NMIH", "RDN", "RYAN", "TIPT"],
+  "Insurance Brokers": ["AIFU", "AJG", "AON", "BRO", "BWIN", "CRD-A", "CRD-B", "CRVL", "EHTH", "ERIE", "GOCO", "GSHD", "HUIZ", "KG", "MMC", "RELI", "SLQT", "TIRX", "TWFG", "WTW", "XHG", "ZBAO"],
+  "Integrated Freight & Logistics": ["CHRW", "CRGO", "EXPD", "FDX", "FWRD", "GXO", "HUBG", "JBHT", "JYD", "LSTR", "PSIG", "RLGT", "RXO", "SFWL", "UPS", "XPO", "ZTO"],
+  "Internet Retail": ["AKA", "AMZN", "APRN", "BABA", "BOXD", "BZUN", "CHWY", "CPNG", "CVNA", "DADA", "DIBS", "DTC", "EBAY", "ETSY", "FTCH", "FVRR", "GLBE", "HEPS", "HOUR", "IMBI", "IPW", "JD", "JFBR", "JMIA", "JWEL", "LITB", "LQDT", "MELI", "MFH", "MOGU", "NEGG", "NHTC", "OCG", "OSTK", "PDD", "PIK", "POSH", "PRTS", "QRTEB", "RERE", "RMBL", "RVLV", "SECO", "TDUP", "TKAT", "VIPS", "W", "WISH", "WNW", "YJ"],
+  "Internet Content & Information": ["BIDU", "BILI", "DIDI", "GOOG", "GOOGL", "META", "PINS", "SNAP", "TME", "WB", "YNDX", "YY"],
+  "Leisure": ["AOUT", "BBIG", "BC", "BTN", "CLAR", "CNXA", "DS", "ESCA", "FNKO", "FUN", "FXLV", "GOLF", "HAS", "ISPO", "JAKK", "JOUT", "LTH", "MANU", "MAT", "MODG", "NLS", "OSW", "PLBY", "PLNT", "POOL", "PTON", "SEAS", "SIX", "SPWH", "VSTO", "XPOF", "YETI"],
+  "Lodging": ["CHH", "GHG", "H", "HLT", "HTHT", "IHG", "INTG", "MAR", "MCG", "SOND", "WH"],
+  "Lumber & Wood Production": ["BCC", "LPX", "NWGL", "PCH", "RYN", "UFPI", "WFG", "WY"],
+  "Luxury Goods": ["BGI", "BRLT", "CTHR", "FOSL", "MOV", "MYTE", "SIG", "TPR"],
+  "Marine Shipping": ["CMRE", "DAC", "DSX", "EGLE", "GOGL", "GRIN", "GSL", "MATX", "NMM", "PANL", "PXS", "SBLK", "TK", "ZIM"],
+  "Medical Care Facilities": ["ACHC", "CYH", "DGX", "GHM", "HCA", "SEM", "THC", "UHS"],
+  "Medical Devices": ["ABT", "ALGN", "BSX", "DXCM", "EW", "ISRG", "MDT", "SWAV", "SYK", "ZBH"],
+  "Medical Distribution": ["ABC", "CAH", "HSIC", "MCK", "OPCH", "SNDX"],
+  "Medical Instruments & Supplies": ["CNMD", "DHR", "ICU", "ICUI", "NARI", "OFIX", "PKI", "PRCT", "SILK", "TMO"],
+  "Metal Fabrication": ["AA", "ATI", "CLF", "CMC", "NUE", "SIM", "STLD", "X", "ZEUS"],
+  "Mortgage Finance": ["AGNC", "COOP", "EFC", "NLY", "OCN", "PFSI", "PMT", "RKT", "UWMC"],
+  "Oil & Gas E&P": ["APA", "AR", "CHK", "CHRD", "CIVI", "CNQ", "COP", "CTRA", "DVN", "EOG", "EQT", "FANG", "HES", "MGY", "MRO", "MTDR", "MUR", "OVV", "OXY", "PR", "RRC", "SM", "SWN", "TPL", "VIST", "VRN", "WDS"],
+  "Oil & Gas Equipment & Services": ["ACDC", "AESI", "AROC", "BKR", "CHX", "FTI", "HAL", "HLX", "KGS", "LBRT", "NOV", "OII", "RES", "SLB", "SLCA", "TDW", "TS", "USAC", "VAL", "WFRD", "WHD", "XPRO"],
+  "Oil & Gas Integrated": ["BP", "CVE", "CVX", "E", "EC", "EQNR", "HNRA", "IMO", "NFG", "PBR", "SHEL", "SLNG", "SU", "TGS", "TTE", "VIVK", "XOM", "YPF"],
+  "Oil & Gas Midstream": ["AM", "BANL", "BPT", "BROG", "CLCO", "CQP", "DHT", "DLNG", "DTM", "EE", "ENB", "ENLC", "EPD", "ET", "ETRN", "EURN", "FLNG", "FRO", "GEL", "GLNG", "GLP", "HESM", "IMPP", "INSW", "KMI", "KNTK", "LNG", "LPG", "MARPS", "MMLP", "MPLX", "NGL", "NVGS", "OKE", "OSG", "PAA", "PAGP", "PBA", "PBT", "PXS", "SMLP", "STNG", "TK", "TNK", "TNP", "TOPS", "TRGP", "TRMD", "TRP", "VNOM", "WES", "WMB"],
+  "Oil & Gas Refining & Marketing": ["AE", "AMTX", "CAPL", "CLNE", "CSAN", "CVI", "DINO", "DK", "DKL", "IEP", "MPC", "PARR", "PBF", "PSX", "SGU", "SUN", "UGP", "VLO", "VTNR", "VVV", "WKC"],
+  "Oil & Gas Drilling": ["BORR", "ENSV", "HP", "NBR", "NE", "PACD", "PTEN", "RIG", "SDPI", "VAL"],
+  "Other Industrial Metals & Mining": ["EGO", "FCX", "GROY", "MP", "NGD", "NILSY", "RIO", "SA", "SCCO", "VALE"],
+  "Other Precious Metals & Mining": ["AEM", "AGI", "AUY", "FNV", "HL", "NEM", "NG", "RGLD", "SAND", "WPM"],
+  "Packaged Foods": ["CAG", "CPB", "GIS", "HRL", "K", "KHC", "KO", "MDLZ", "PEP", "SJM", "TSN"],
+  "Packaging & Containers": ["AMBP", "AMCR", "ATR", "BALL", "BERY", "CCK", "FFHL", "GEF", "GPK", "IP", "KRT", "MYE", "OI", "PACK", "PKG", "PTVE", "REYN", "SEE", "SLGN", "SON", "TUP", "TYDE", "UFPT", "WRK"],
+  "Paper & Paper Products": ["CLW", "GLT", "GPK", "IP", "MERK", "PKG", "SLVM", "SWM", "WRK"],
+  "Personal Services": ["BFAM", "CSV", "DSEY", "EJH", "EM", "FRG", "FTDR", "HRB", "MCW", "MED", "MRM", "RGS", "ROL", "ROVR", "SCI", "STON", "WW", "XWEL"],
+  "Pharmaceutical Retailers": ["AMZN", "CVS", "RAD", "WBA", "WMT"],
+  "Pollution & Treatment Controls": ["AQUA", "CLVT", "CWST", "ECVT", "HCCI", "MTRX", "TTEK"],
+  "Publishing": ["BIDU", "EDU", "GCI", "LRN", "NWS", "NWSA", "NYT", "SCHL"],
+  "REIT - Diversified": ["AIRC", "ALEX", "BHR", "BXP", "CIO", "CTO", "FPI", "GOOD", "HPP", "LADR", "LAND", "NYC", "PECO", "RLTY", "STAR"],
+  "REIT - Healthcare Facilities": ["CHCT", "DOC", "GMRE", "HR", "HTA", "MPW", "NHI", "OHI", "PEAK", "SNR", "UHT", "VTR", "WELL"],
+  "REIT - Hotel & Motel": ["AHT", "APLE", "BHR", "CHH", "CLDT", "DRH", "HST", "HT", "INN", "MDRR", "PK", "RHP", "RLJ", "SHO", "XHR"],
+  "REIT - Industrial": ["AMR", "CTLP", "DRE", "EXR", "FR", "ILPT", "INDS", "IRON", "PLD", "PSA", "STAG", "TRNO"],
+  "REIT - Mortgage": ["AGNC", "ARR", "BXMT", "CIM", "CMO", "DX", "EARN", "IVR", "LADR", "NLY", "NRZ", "ORC", "PMT", "RWT", "TWO"],
+  "Real Estate - Diversified": ["CHCI", "HHH", "JOE", "STRS", "VINO"],
+  "Real Estate Services": ["AMH", "BEKE", "CBRE", "CIGI", "COMP", "CWK", "DFH", "DOUG", "EXPI", "FATH", "HOUS", "HPP", "INVH", "JLL", "MMI", "OPEN", "RDFN", "RMAX", "SVT", "WE", "Z", "ZG"],
+  "Recreational Vehicles": ["CWH", "DOOO", "EZGO", "FOXF", "FRZA", "FUV", "HLBZ", "HOG", "LCII", "MBUU", "MCFT", "MPX", "ONEW", "PII", "REE", "THO", "VEEE", "VMAR", "WGO"],
+  "Rental & Leasing Services": ["AER", "AL", "AYR", "CAR", "HEES", "HRI", "HTZ", "R", "TRTN", "URI"],
+  "Residential Construction": ["BZH", "CCS", "CVCO", "DFH", "DHI", "GRBK", "HOV", "HOVNP", "KBH", "LEGH", "LEN-B", "LGIH", "MDC", "MHO", "MTH", "NVR", "PHM", "SKY", "TMHC", "TOL", "TPH"],
+  "Resorts & Casinos": ["BALY", "BVH", "BYD", "CNTY", "CZR", "FLL", "GDEN", "HGV", "LVS", "MCRI", "MGM", "MLCO", "MSC", "MTN", "PENN", "PLYA", "RRR", "SLNA", "VAC", "WYNN"],
+  "Restaurants": ["ARCO", "ARKR", "ARMK", "BDL", "BFI", "BH", "BJRI", "BLMN", "BROS", "BTB", "BTBD", "CAKE", "CBRL", "CHUY", "CMG", "CNNE", "DENN", "DIN", "DPZ", "DRI", "EAT", "FATBB", "FRGI", "FWRG", "GRIL", "GTIM", "JACK", "KRUS", "LOCO", "MCD", "NATH", "NDLS", "PBPB", "PLAY", "PTLO", "PZZA", "QSR", "RAVE", "REBN", "RICK", "RRGB", "RUTH", "SBUX", "SG", "SHAK", "STKS", "TAST", "THCH", "TXRH", "WEN", "WING", "YOSH", "YUM", "YUMC"],
+  "Scientific & Technical Instruments": ["BRKR", "COHR", "FTV", "GRMN", "KEYS", "MTD", "ROP", "TDY"],
+  "Security & Protection Services": ["ADT", "ALRM", "AXON", "G", "NSSC"],
+  "Semiconductor Equipment & Materials": ["ACLS", "AEIS", "AMAT", "ASML", "COHU", "ENTG", "FORM", "ICHR", "KLAC", "LRCX", "NVMI", "ONTO", "TER", "UCTT", "VECO"],
+  "Semiconductors": ["ADI", "AMD", "AVGO", "DIOD", "INTC", "LSCC", "MPWR", "MRVL", "MU", "MXL", "NVDA", "NXPI", "ON", "QCOM", "SLAB", "SMTC", "STM", "SYNA", "TXN", "WOLF"],
+  "Silver": ["AG", "EXK", "MAG", "SVM"],
+  "Software - Application": ["ABNB", "ADBE", "ADSK", "ASAN", "BILL", "CRM", "DDOG", "DOCU", "ESTC", "INTU", "MDB", "NET", "NOW", "PAYC", "SHOP", "SNOW", "TEAM", "TWLO", "WDAY", "ZM"],
+  "Software - Infrastructure": ["ACIW", "AEVA", "AFRM", "AI", "AIOT", "AISP", "AKAM", "ALAR", "ALLT", "AMBR", "APPN", "ARAI", "ARBE", "ARQQ", "ATCH", "ATEN", "ATGL", "AUID", "AVDX", "AVPT", "BAND", "BASE", "BB", "BKKT", "BLIN", "BLZE", "BNAI", "BOX", "CALX", "CCSI", "CETX", "CFLT", "CGNT", "CHKP", "CINT", "CISO", "CLBT", "CORZ", "CPAY", "CRWD", "CRWV", "CSAI", "CSGS", "CYBR", "DAVA", "DBX", "DFDV", "DLO", "DOCN", "DOX", "DTSS", "DVLT", "EEFT", "EVCM", "EVTC", "EXOD", "FAAS", "FATN", "FFIV", "FIVN", "FLYW", "FOUR", "FTNT", "GB", "GCT", "GDDY", "GEN", "GPN", "GRRR", "GTLB", "HPAI", "HUBC", "IIIV", "IMXI", "INFA", "INTZ", "IOT", "JG", "KPLT", "KSPI", "KVYO", "LHSW", "LIDR", "LSAK", "MCRP", "MDB", "MLGO", "MOGO", "MQ", "MSAI", "MSFT", "NBIS", "NET", "NN", "NTCT", "NTNX", "NYAX", "ODD", "OKTA", "OLB", "ORCL", "OS", "OSPN", "PAGS", "PANW", "PATH", "PAY", "PAYO", "PAYS", "PDYN", "PGY", "PLTR", "PRGS", "PRTH", "PSFE", "QLYS", "RAMP", "RBRK", "RDWR", "REKR", "RELY", "RPAY", "RPD", "RVYL", "RXT", "RZLV", "S", "SABR", "SAIL", "SANG", "SNCR", "SNPS", "STNE", "SUPX", "TAOP", "TCX", "TDC", "TENB", "TIXT", "TLS", "TOST", "TUYA", "TWLO", "UBXG", "USIO", "VERI", "VHC", "VRAR", "VRNS", "VRNT", "VRSN", "WEX", "WIX", "XBP", "XNET", "XYZ", "YEXT", "ZENA", "ZETA", "ZS"],
+  "Solar": ["ARRY", "CSIQ", "DQ", "ENPH", "FSLR", "FTCI", "JKS", "MAXN", "NOVA", "RUN", "SEDG", "SHLS", "SPWR"],
+  "Specialty Chemicals": ["ALB", "ALTO", "AMRS", "AVNT", "AVTR", "AXTA", "BCPC", "CBT", "CC", "CCF", "CMT", "CNEY", "CRKN", "DNMR", "ECL", "ECVT", "ESI", "FEAM", "FSI", "FUL", "GEVO", "GPRE", "GURE", "HDSN", "HWKN", "IFF", "IOSP", "KOP", "KRO", "KWR", "LIN", "LOOP", "LTHM", "LWLG", "LYB", "NEU", "NGVT", "NTIC", "ODC", "OEC", "OLN", "POL", "PPG", "PRM", "RPM", "SCL", "SHW", "SNES", "SXT", "TG", "TSE", "VNTR", "WDFC", "WLK"],
+  "Specialty Industrial Machinery": ["AOS", "AWK", "CSWI", "CW", "DC", "DOV", "FSS", "GBX", "GTLS", "ITW", "JBT", "KAI", "KMT", "KOP", "LNN", "LTHM", "MSA", "NDSN", "NOVT", "NPO", "OCIP", "PUMP", "RPM", "RRX", "SHMD", "SLGN", "SNA", "SPXC", "SWK", "TS", "TTC", "TTI", "WFG", "WTS", "XYL", "ZWS"],
+  "Staffing & Employment Services": ["ATSG", "BBSI", "BG", "CD", "HSN", "JOB", "KELYA", "KELYB", "KFRC", "MAN", "RCM", "TBI", "TSGS", "UP", "ZIP"],
+  "Steel": ["AA", "ATI", "CLF", "CMC", "NUE", "PKX", "RS", "STLD", "TMST", "TS", "TX", "USAP", "X"],
+  "Telecom Services": ["AT", "BEV", "BT", "CNSL", "DTEGY", "FTRNQ", "LUMN", "NOK", "ORAN", "T", "TEF", "TMUS", "USM", "VZ"],
+  "Textile Manufacturing": ["CRWS", "GIII", "MHP", "NTZ", "TEX", "TRC", "ULBI"],
+  "Thermal Coal": ["ARCH", "AREC", "ARLP", "BTU", "CEIX", "HNRG", "NC", "NRP"],
+  "Tobacco": ["BTI", "IMBBY", "MO", "PM", "RLX", "TPB", "UVV", "VGR"],
+  "Tools & Accessories": ["AAN", "AEM", "AOS", "ATKR", "CLX", "CR", "CSTM", "DNOW", "FAST", "IR", "ITT", "MKC", "MLI", "SNA", "SWK"],
+  "Travel Services": ["ABNB", "BKNG", "CEL", "DESP", "EXPE", "HRB", "ONVC", "TNL", "TRIP", "TZOO"],
+  "Trucking": ["ARCB", "CARB", "CVLG", "EXPD", "JBHT", "KNX", "LSTR", "ODFL", "SAIA", "USX", "WERN", "YELL"],
+  "Uranium": ["CCJ", "DNN", "EU", "ISOU", "LEU", "NXE", "UEC", "URG", "UROY", "UUUU"],
+  "Utilities - Diversified": ["AEE", "AEP", "ALE", "AVA", "D", "DUK", "EVRG", "EXC", "FORTY", "NI", "NWE", "PPL", "SO", "WEC"],
+  "Utilities - Independent Power Producers": ["DGXX", "KEN", "NRG", "PAM", "TAC", "TLN", "VST"],
+  "Utilities - Regulated Electric": ["AGR", "BKH", "EIX", "ETR", "FE", "HawaiianElectric", "IDA", "MGEE", "NEE", "OGE", "OTTR", "PNM", "POR", "TE", "XEL"],
+  "Utilities - Regulated Gas": ["ATO", "CMS", "NI", "NWN", "OKE", "SJI", "SO", "SR", "UGI", "WGL"],
+  "Utilities - Renewable": ["BEP", "BEPC", "BNRG", "CEG", "CREG", "CWEN", "CWEN-A", "EBR", "ELLO", "ENLT", "FLNC", "HTOO", "NRGV", "NXXT", "ORA", "RNW", "SAFX", "STEM", "SUUN", "VGAS", "WAVE", "XIFR"],
+  "Waste Management": ["CLH", "CWST", "ECVT", "EQ", "HCCI", "PCT", "RSG", "WCN", "WM"]
 }
