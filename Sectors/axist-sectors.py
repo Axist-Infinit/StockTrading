@@ -224,7 +224,15 @@ try:
     from ibapi.wrapper import EWrapper
     from ibapi.contract import Contract
 except ImportError:
-    EClient = EWrapper = object
+    class _IBKRClientStub:
+        pass
+
+    class _IBKRWrapperStub:
+        pass
+
+    EClient = _IBKRClientStub
+    EWrapper = _IBKRWrapperStub
+    Contract = object
 
 class IBKRClient(BrokerBase, EWrapper, EClient):
     "Light-weight pull-only IBKR client (TWS / Gateway must be running)."
