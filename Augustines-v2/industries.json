@@ -34,10 +34,10 @@
   "Drug Manufacturers - General": ["AZN", "BMY", "GSK", "JNJ", "LLY", "MRK", "NVO", "NVS", "PFE", "SNY"],
   "Drug Manufacturers - Specialty & Generic": ["ALKS", "PRGO", "TEVA", "VTRS"],
   "Education & Training Services": ["AACG", "APEI", "ATGE", "CHGG", "DAO", "DUOL", "EDU", "GOTU", "LINC", "LOPE", "LRN", "METX", "MYGR", "PRDO", "TAL", "TEDU", "UTI", "VSTA", "YQ"],
-  "Electrical Equipment & Parts": ["ADN", "ADSE", "AEIS", "AMPX", "APWC", "ATKR", "AVI", "BE", "CBAT", "CCTG", "DFLI", "EAF", "ELPW", "ELVA", "EMR", "ENR", "ENS", "ENVX", "EOSE", "EPOW", "ESP", "FCEL", "FLUX", "GWH", "HAYW", "HUBB", "IPWR", "KE", "LNKS", "LTBR", "NEOV", "NVT", "NVX", "PLPC", "PLUG", "POLA", "PPSI", "RAYA", "RFIL", "SDST", "SKYX", "STI", "TE", "TGEN", "ULBI", "VRT", "XPON"],
+  "Electrical Equipment & Parts": ["ABB", "AME", "AZZ", "EMR", "ENS", "ETN", "NVT", "ROK"],
   "Electronic Components": ["ALNT", "APH", "BELFB", "BHE", "CLS", "CPSH", "CTS", "DAIO", "DAKT", "DSWL", "ELTK", "FLEX", "FN", "GAUZ", "GLW", "HOLO", "IMTE", "JBL", "KN", "KOPN", "KULR", "LFUS", "LINK", "LPTH", "LYTS", "MEI", "MKDW", "MPTI", "MTEK", "NEON", "OLED", "OPTX", "OSIS", "OST", "OUST", "PLXS", "REFR", "RELL", "ROG", "SANM", "SELX", "SGMA", "TEL", "TTMI", "VICR", "WBX"],
   "Electronic Gaming & Multimedia": ["BHAT", "DDI", "EA", "GAME", "GCL", "GDC", "GDEV", "GIGM", "GMGI", "GMHS", "GRVY", "GXAI", "MSGM", "MYPS", "NTES", "PLTK", "RBLX", "SKLZ", "SNAL", "SOHU", "TBH", "TRUG", "TTWO"],
-  "Electronics & Computer Distribution": ["ARW", "AVT", "BGIN", "CIIT", "CLMB", "CNXN", "ISM", "NSIT", "SCSC", "SNX", "TAIT"],
+  "Electronics & Computer Distribution": ["ARW", "AVT", "SNX"],
   "Engineering & Construction": ["ACM", "AENZ", "AGFY", "AGX", "AMRC", "APG", "ATCX", "BBCP", "BLD", "DRTT", "DY", "EME", "ENG", "ESOA", "FIX", "FLR", "GLDD", "GVA", "HIL", "IESC", "J", "KBR", "LMB", "MTZ", "MYRG", "NVEE", "OIG", "ORN", "PRIM", "PWR", "RCMT", "ROAD", "STN", "STRL", "TPC", "TTEK", "VATE", "WLDN", "WLMS"],
   "Gold": ["AAUC", "AEM", "AGI", "ARMN", "AU", "AUST", "B", "BTG", "CDE", "CGAU", "CMCL", "CNL", "CTGO", "DC", "DRD", "EGO", "EQX", "FNV", "FSM", "GAU", "GFI", "GLDG", "GORO", "GROY", "HMY", "HYMC", "IAG", "IAUX", "IDR", "KGC", "NAMM", "NEM", "NFGC", "NG", "NGD", "ODV", "OR", "ORLA", "PAAS", "PZG", "RGLD", "SA", "SAND", "SSRM", "THM", "TRX", "USAU", "VGZ", "WPM"],
   "Information Technology Services": ["ACN", "APLD", "ARBB", "ASGN", "AUR", "BBAI", "BR", "BTCM", "CACI", "CDW", "CLPS", "CLVT", "CNDT", "CNXC", "CSPI", "CTLP", "CTM", "CTSH", "CYCU", "DTST", "DXC", "EPAM", "EXLS", "FI", "FIS", "FORTY", "G", "GDS", "GDYN", "GIB", "GLE", "GLOB", "GMM", "HCKT", "IBEX", "IBM", "III", "INFY", "INGM", "INOD", "IT", "JDZG", "JFU", "JKHY", "JZ", "KD", "LDOS", "LZMH", "MFH", "MGIC", "NABL", "NOTE", "PENG", "PONY", "PSN", "SAIC", "SAIH", "TASK", "TDTH", "TSSI", "TTEC", "TTGT", "UIS", "VEEA", "VNET", "VRRM", "VYX", "WIT", "WNS", "WYY", "XRX"],
@@ -111,3 +111,4 @@
   "Utilities - Renewable": ["BEP", "BEPC", "BNRG", "CEG", "CREG", "CWEN", "EBR", "ELLO", "ENLT", "FLNC", "HTOO", "NRGV", "NXXT", "ORA", "RNW", "SAFX", "STEM", "SUUN", "VGAS", "WAVE", "XIFR"],
   "Waste Management": ["AMBI","AQMS","AWX","CDTG","CLH","CWST","DXST","ENGS","ESGL","GFL","GWAV","LNZA","MEG","NVRI","PESI","QRHC","RSG","WCN","WM"]
 }
+

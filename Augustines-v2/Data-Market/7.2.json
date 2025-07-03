@@ -1,0 +1,27 @@
+{
+  "1_day": {
+    "Positive-trend + low-vol": 65,
+    "Positive-trend + high-vol": 5,
+    "Negative-trend + high-vol": 10,
+    "Negative-trend + low-vol / range": 20
+  },
+  "3_days": {
+    "Positive-trend + low-vol": 60,
+    "Positive-trend + high-vol": 5,
+    "Negative-trend + high-vol": 15,
+    "Negative-trend + low-vol / range": 20
+  },
+  "1_week": {
+    "Positive-trend + low-vol": 55,
+    "Positive-trend + high-vol": 5,
+    "Negative-trend + high-vol": 20,
+    "Negative-trend + low-vol / range": 20
+  },
+  "2_weeks": {
+    "Positive-trend + low-vol": 45,
+    "Positive-trend + high-vol": 10,
+    "Negative-trend + high-vol": 20,
+    "Negative-trend + low-vol / range": 25
+  }
+}
+

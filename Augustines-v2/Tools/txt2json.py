@@ -1,22 +1,12 @@
 #!/usr/bin/env python3
 """
-txt2json.py  –  Convert FinViz‑style industry tables to JSON
+txt2json_universal.py  –  Convert any FinViz‑style table to JSON
 
 Usage
 -----
-    python txt2json.py  INPUT.txt  OUTPUT.json
-
-• INPUT.txt  – file that contains the raw table (the block you pasted).
-• OUTPUT.json – file to write the JSON array to.
-
-The script:
-1. Reads the first non‑blank line as the header.
-2. Accepts either real tab characters or runs of ≥2 spaces as separators.
-3. Normalises the header names (removes full stops, turns spaces into underscores).
-4. Produces a list of dicts and writes it prettified (indent=2) to OUTPUT.json.
+    python txt2json_universal.py  INPUT.txt  OUTPUT.json
 """
 
-import csv
 import json
 import re
 import sys
@@ -24,52 +14,49 @@ from pathlib import Path
 
 
 def smart_split(line: str) -> list[str]:
-    """Split on tab if present, otherwise on 2+ consecutive spaces."""
+    """Prefer tab split; otherwise split on runs of ≥2 spaces."""
     return line.rstrip("\n").split("\t") if "\t" in line else re.split(r"\s{2,}", line.strip())
 
 
-def normalise_header(raw_header: list[str]) -> list[str]:
-    out = []
-    for h in raw_header:
-        h = h.replace(".", "")          # 'No.' ➜ 'No'
-        h = h.replace(" ", "_")         # 'Perf Week' ➜ 'Perf_Week'
-        out.append(h)
-    return out
+def normalise_header(raw: list[str]) -> list[str]:
+    """Make header names JSON‑key friendly."""
+    cleaned = []
+    for h in raw:
+        h = h.strip().replace(" ", "_")
+        h = re.sub(r"[^\w]", "", h)      # keep A‑Z a‑z 0‑9 _
+        h = re.sub(r"__+", "_", h)       # collapse repeats
+        cleaned.append(h)
+    return cleaned
 
 
-def read_table(path: Path) -> list[dict]:
-    records: list[dict] = []
-    header: list[str] | None = None
-
+def parse_table(path: Path) -> list[dict]:
+    rows, header = [], None
     with path.open(encoding="utf-8") as f:
-        for line in f:
-            if not line.strip():
-                continue  # skip blank lines
-
-            cells = smart_split(line)
+        for ln in f:
+            if not ln.strip():
+                continue
+            cells = smart_split(ln)
             if header is None:
                 header = normalise_header(cells)
                 continue
+            # defensive pad / trim
+            if len(cells) < len(header):
+                cells += [""] * (len(header) - len(cells))
+            elif len(cells) > len(header):
+                cells = cells[: len(header)]
+            rows.append(dict(zip(header, cells)))
+    return rows
 
-            # Pad short rows (defensive)
-            cells += [""] * (len(header) - len(cells))
-            record = dict(zip(header, cells))
-            records.append(record)
 
-    return records
-
-
-def main() -> None:
+def main():
     if len(sys.argv) != 3:
         print(__doc__)
         sys.exit(1)
 
-    in_file = Path(sys.argv[1])
-    out_file = Path(sys.argv[2])
-
-    data = read_table(in_file)
-    out_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    print(f"✔  {len(data)} records written to {out_file}")
+    src, dst = Path(sys.argv[1]), Path(sys.argv[2])
+    data = parse_table(src)
+    dst.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    print(f"✔  {len(data)} records written → {dst}")
 
 
 if __name__ == "__main__":
