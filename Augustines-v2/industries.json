@@ -62,7 +62,7 @@
   "Oil & Gas Equipment & Services": ["ACDC", "AESI", "AROC", "BKR", "CHX", "FTI", "HAL", "HLX", "KGS", "LBRT", "NOV", "OII", "RES", "SLB", "SLCA", "TDW", "TS", "USAC", "VAL", "WFRD", "WHD", "XPRO"],
   "Oil & Gas Integrated": ["BP", "CVE", "CVX", "E", "EC", "EQNR", "HNRA", "IMO", "NFG", "PBR", "SHEL", "SLNG", "SU", "TGS", "TTE", "VIVK", "XOM", "YPF"],
   "Oil & Gas Midstream": ["AM", "BANL", "BPT", "BROG", "CLCO", "CQP", "DHT", "DLNG", "DTM", "EE", "ENB", "ENLC", "EPD", "ET", "ETRN", "EURN", "FLNG", "FRO", "GEL", "GLNG", "GLP", "HESM", "IMPP", "INSW", "KMI", "KNTK", "LNG", "LPG", "MARPS", "MMLP", "MPLX", "NGL", "NVGS", "OKE", "OSG", "PAA", "PAGP", "PBA", "PBT", "PXS", "SMLP", "STNG", "TK", "TNK", "TNP", "TOPS", "TRGP", "TRMD", "TRP", "VNOM", "WES", "WMB"],
-  "Oil & Gas Refining & Marketing": ["AE", "AMTX", "CAPL", "CLNE", "CSAN", "CVI", "DINO", "DK", "DKL", "IEP", "MPC", "PARR", "PBF", "PSX", "SGU", "SUN", "UGP", "VLO", "VTNR", "VVV", "WKC"],
+  "Oil & Gas Refining & Marketing": ["CAPL", "CLNE", "CSAN", "CVI", "DINO", "DK", "DKL", "IEP", "MPC", "PARR", "PBF", "PSX", "SGU", "SUN", "UGP", "VLO", "WKC"],
   "Oil & Gas Drilling": ["BORR", "ENSV", "HP", "NBR", "NE", "PACD", "PTEN", "RIG", "SDPI", "VAL"],
   "Other Industrial Metals & Mining": ["EGO", "FCX", "GROY", "MP", "NGD", "NILSY", "RIO", "SA", "SCCO", "VALE"],
   "Other Precious Metals & Mining": ["AEM", "AGI", "FNV", "HL", "NEM", "NG", "RGLD", "SAND", "WPM"],
